@@ -15,6 +15,7 @@ Rust MCP server for Memcached/mcrouter ops + diagnostics. Repo: github.com/hakki
 - Protocol crate stays I/O-free; policy (timeouts, allowlist, write gating) lives in `mcp-server`.
 - Capability detection by probing (`mn`), never by version number. 1.5.22 answers `mg` partially but rejects `mn`: treated as no meta.
 - Read-only by default: write tools (`set_key`/`delete_key`/`touch_key`) are only registered with `MEMCACHED_MCP_ALLOW_WRITE=1`; `MEMCACHED_MCP_WRITE_PREFIX` limits keys. No flush tool. Values never returned or logged; audit logs writes + denied targets only.
+- Opt-in features: `sample_keys` (`MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`, prefix totals only; key names need `MEMCACHED_MCP_ALLOW_KEY_NAMES=1`). Never put key names in the audit log. metadump times (`exp`, `la`) are absolute server-clock unix times; do not mix with local clock.
 - Every connection goes through `MemcachedServer::connect` (allowlist). `MEMCACHED_MCP_DEST_MAP` and `MEMCACHED_MCP_METRICS_TARGETS` must not bypass it.
 - HTTP: bearer token mandatory (>=24 chars), non-loopback bind refused without `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`, no TLS in-process.
 - rmcp processes requests concurrently: tests piping several calls at once see out-of-order replies; space them out.
@@ -23,6 +24,6 @@ Rust MCP server for Memcached/mcrouter ops + diagnostics. Repo: github.com/hakki
 
 ## Known gaps
 - `crates/mcp-server/tests/e2e.rs` drives the real binary (stdio + HTTP) in CI; also mcrouter tools incl. compare_destinations (healthy topology, needs `MCROUTER_ADDR` + `MCROUTER_BACKENDS`). Not automated: mcrouter tools with a dead destination over MCP, concurrent/long HTTP sessions.
-- No per-user auth/RBAC; no key inventory (`lru_crawler metadump`); mcrouter not in `/metrics`.
+- No per-user auth/RBAC; mcrouter not in `/metrics`; `sample_keys` cannot sample randomly (crawler order).
 
 See `mem:tech_stack`, `mem:suggested_commands`, `mem:conventions`, `mem:task_completion`.

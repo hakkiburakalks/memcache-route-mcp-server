@@ -483,3 +483,127 @@ async fn mcrouter_tools_over_mcp() {
         "{text}"
     );
 }
+
+#[tokio::test]
+async fn key_sampling_is_opt_in_and_private_by_default() {
+    let Some(addr) = memcached_addr() else { return };
+
+    // Off by default: the tool does not exist.
+    let mut off = Stdio_::start(&[("MEMCACHED_MCP_ALLOWLIST", &addr)]).await;
+    assert!(!off.tool_names().await.iter().any(|n| n == "sample_keys"));
+    let (err, _) = off.call("sample_keys", json!({"addr":addr})).await;
+    assert!(err);
+
+    // Seed some keys with a known prefix structure.
+    let audit: PathBuf = std::env::temp_dir().join(format!(
+        "memcached-mcp-e2e-sample-{}.log",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&audit);
+    let mut w = Stdio_::start(&[
+        ("MEMCACHED_MCP_ALLOWLIST", &addr),
+        ("MEMCACHED_MCP_ALLOW_WRITE", "1"),
+        ("MEMCACHED_MCP_ALLOW_KEY_SAMPLING", "1"),
+        ("MEMCACHED_MCP_AUDIT_LOG", audit.to_str().unwrap()),
+    ])
+    .await;
+    for i in 0..6 {
+        let (err, _) = w
+            .call(
+                "set_key",
+                json!({"addr":addr,"key":format!("inv-a:{i}"),"value":"v"}),
+            )
+            .await;
+        assert!(!err);
+    }
+    for i in 0..3 {
+        let (err, _) = w
+            .call(
+                "set_key",
+                json!({"addr":addr,"key":format!("inv-b:{i}"),"value":"vv"}),
+            )
+            .await;
+        assert!(!err);
+    }
+
+    let (_, info) = w.call("server_info", json!({"addr":addr})).await;
+    if info.contains("version: 1.4") {
+        let (err, text) = w.call("sample_keys", json!({"addr":addr})).await;
+        assert!(err && text.contains("-o lru_crawler"), "{text}");
+        return;
+    }
+
+    // Prefix totals only: no key names, and asking for names is refused.
+    let (err, text) = w
+        .call("sample_keys", json!({"addr":addr,"prefix":"inv-"}))
+        .await;
+    assert!(!err, "{text}");
+    let r: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["complete"], json!(true));
+    assert_eq!(r["matched"], json!(9));
+    assert_eq!(r["never_fetched"], json!(9));
+    assert_eq!(r["prefixes"][0]["prefix"], json!("inv-a"));
+    assert_eq!(r["prefixes"][0]["items"], json!(6));
+    assert_eq!(r["prefixes"][1]["prefix"], json!("inv-b"));
+    assert_eq!(r["keys"], json!([]));
+    assert!(
+        !text.contains("inv-a:0"),
+        "key names must not leak without MEMCACHED_MCP_ALLOW_KEY_NAMES"
+    );
+
+    let (err, text) = w
+        .call(
+            "sample_keys",
+            json!({"addr":addr,"prefix":"inv-","include_keys":true}),
+        )
+        .await;
+    assert!(
+        err && text.contains("MEMCACHED_MCP_ALLOW_KEY_NAMES"),
+        "{text}"
+    );
+    let (err, text) = w
+        .call("sample_keys", json!({"addr":addr,"delimiter":"ab"}))
+        .await;
+    assert!(err && text.contains("one character"), "{text}");
+
+    // A scan cut short says so instead of passing the totals off as the whole cache.
+    let (err, text) = w
+        .call("sample_keys", json!({"addr":addr,"max_scan":2}))
+        .await;
+    let r: Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        !err && r["complete"] == json!(false) && r["scanned"] == json!(2),
+        "{text}"
+    );
+    assert!(text.contains("not representative"));
+
+    // Names appear only when the server operator has also allowed them.
+    let mut n = Stdio_::start(&[
+        ("MEMCACHED_MCP_ALLOWLIST", &addr),
+        ("MEMCACHED_MCP_ALLOW_KEY_SAMPLING", "1"),
+        ("MEMCACHED_MCP_ALLOW_KEY_NAMES", "1"),
+    ])
+    .await;
+    let (err, text) = n
+        .call(
+            "sample_keys",
+            json!({"addr":addr,"prefix":"inv-a","include_keys":true,"max_keys":2}),
+        )
+        .await;
+    assert!(!err, "{text}");
+    let r: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["keys"].as_array().unwrap().len(), 2);
+    assert!(r["keys"][0]["key"].as_str().unwrap().starts_with("inv-a:"));
+    assert!(r["keys"][0].get("value").is_none());
+
+    // The audit trail records that a sample happened, never which keys were seen.
+    let log = std::fs::read_to_string(&audit).unwrap();
+    let _ = std::fs::remove_file(&audit);
+    assert!(log.contains(r#""tool":"sample_keys""#) && log.contains("names_returned=false"));
+    for line in log.lines().filter(|l| l.contains("sample_keys")) {
+        assert!(
+            !line.contains("inv-"),
+            "sample_keys audit lines must not carry key names: {line}"
+        );
+    }
+}

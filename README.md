@@ -11,6 +11,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 - **Audit trail.** Writes and rejected targets are logged as JSON lines to `MEMCACHED_MCP_AUDIT_LOG` (or stderr). Key names and outcomes are recorded, never values. Reads are not audited.
 - **Authenticated over HTTP.** The HTTP transport requires a bearer token (see below); stdio relies on whoever can start the process.
 - **Allowlist.** The server only connects to `host:port` pairs listed in `MEMCACHED_MCP_ALLOWLIST` (comma-separated). With an empty list every target is rejected.
+- **Key sampling is opt-in and private by default.** `sample_keys` exists only with `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1` and then returns prefix totals, not key names. Individual key names additionally need `MEMCACHED_MCP_ALLOW_KEY_NAMES=1`. The audit log records that a sample ran, never which keys it saw.
 - **No values.** `get_key_metadata` returns metadata (existence, size, flags and, where supported, TTL and access info), never the value.
 - **Capability probing.** Features are detected by asking the server (`version`, `mn`), not guessed from the version number.
 
@@ -28,7 +29,10 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | `mcrouter_compare_destinations` | Looks at each memcached behind an mcrouter and flags outliers and per-node problems (needs `MEMCACHED_MCP_DEST_MAP`) |
 | `mcrouter_diagnose_failover` | Is there a failover handle, is anything down, and what that means for reads and writes |
 | `mcrouter_trace_key_route` | Which destination a key routes to (asks mcrouter itself); says so when the destination is down |
+| `sample_keys` | What is stored: items, bytes and never-fetched counts per key prefix, from the LRU crawler's metadata dump. Only with `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1` |
 | `set_key`, `delete_key`, `touch_key` | Writes; only with `MEMCACHED_MCP_ALLOW_WRITE=1` |
+
+`sample_keys` puts load on the server (it uses the LRU crawler), reads at most `max_scan` items (10,000 by default, 100,000 at most) and says so when it stopped early. The crawler's order is not random, so a partial scan is biased. It needs the crawler to be enabled, which it is on 1.5 and 1.6 but not by default on 1.4 (`-o lru_crawler`).
 
 Diagnostic thresholds are heuristics and have not been tuned on production traffic. Looking up a key's metadata still counts in the server's global `get_hits`/`get_misses` totals, though it leaves the item's LRU position and fetched-before state alone.
 

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+pub mod inventory;
 pub mod prometheus;
 
 pub type Stats = BTreeMap<String, String>;

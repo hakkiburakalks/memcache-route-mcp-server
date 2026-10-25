@@ -57,3 +57,48 @@ async fn meta_info_reports_without_disturbing_the_item() {
 
     assert_eq!(c.meta_info(b"mcp:no-such-key").await.unwrap(), None);
 }
+
+#[tokio::test]
+async fn metadump_lists_keys_without_values_and_can_stop_early() {
+    let Ok(addr) = std::env::var("MEMCACHED_ADDR") else {
+        return;
+    };
+    let timeout = Duration::from_secs(5);
+    let mut c = Client::connect(&addr, timeout).await.unwrap();
+    let version = c.version().await.unwrap();
+    for i in 0..50 {
+        let key = format!("dump:{i:02}");
+        c.store(StoreCmd::Set, key.as_bytes(), 0, 0, b"SECRET")
+            .await
+            .unwrap();
+    }
+
+    let first = Client::connect(&addr, timeout).await.unwrap();
+    let sample = first.dump_keys(10_000).await;
+    if version.starts_with("1.4") {
+        // The LRU crawler is off by default on 1.4.
+        let err = sample.expect_err("1.4 should refuse metadump").to_string();
+        assert!(err.contains("disabled"), "{err}");
+        return;
+    }
+    let sample = sample.unwrap();
+    assert!(sample.complete);
+    let ours: Vec<_> = sample
+        .entries
+        .iter()
+        .filter(|e| e.key.starts_with("dump:"))
+        .collect();
+    assert_eq!(ours.len(), 50);
+    assert!(ours.iter().all(|e| e.expires_at.is_none() && !e.fetched));
+    assert!(!format!("{:?}", sample.entries).contains("SECRET"));
+
+    // Stopping early reports an incomplete sample and leaves the server usable.
+    let partial = Client::connect(&addr, timeout)
+        .await
+        .unwrap()
+        .dump_keys(5)
+        .await
+        .unwrap();
+    assert_eq!((partial.entries.len(), partial.complete), (5, false));
+    assert!(c.stats(None).await.unwrap().contains_key("pid"));
+}

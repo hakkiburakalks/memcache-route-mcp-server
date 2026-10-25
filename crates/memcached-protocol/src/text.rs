@@ -183,6 +183,92 @@ pub fn parse_meta_get(line: &str) -> Result<MetaGet, ProtocolError> {
     Err(ProtocolError::Malformed(line.to_owned()))
 }
 
+/// Starts a dump of every item's metadata. Needs the LRU crawler (off by default on 1.4).
+pub fn encode_metadump() -> Vec<u8> {
+    b"lru_crawler metadump all\r\n".to_vec()
+}
+
+/// One item from `lru_crawler metadump`. The value is never part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DumpEntry {
+    /// URL-decoded; non-UTF-8 bytes are replaced.
+    pub key: String,
+    /// Unix time the item expires, None if it never does.
+    pub expires_at: Option<u64>,
+    /// Unix time of the last recorded access. Updated lazily, so it can lag by about a minute.
+    pub last_access: u64,
+    /// Whether the item has been fetched since it was stored.
+    pub fetched: bool,
+    /// Total item size including overhead, not the value length.
+    pub size: u64,
+    pub slab_class: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DumpLine {
+    Entry(DumpEntry),
+    /// 1.6 sends `OK` before the entries.
+    Ok,
+    End,
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub fn parse_dump_line(line: &str) -> Result<DumpLine, ProtocolError> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    match line {
+        "END" => return Ok(DumpLine::End),
+        "OK" => return Ok(DumpLine::Ok),
+        _ => {}
+    }
+    if line.starts_with("ERROR")
+        || line.starts_with("SERVER_ERROR")
+        || line.starts_with("CLIENT_ERROR")
+    {
+        return Err(ProtocolError::Server(line.to_owned()));
+    }
+    let bad = || ProtocolError::Malformed(line.to_owned());
+    let (mut key, mut exp, mut la, mut fetch, mut size, mut cls) =
+        (None, None, None, None, None, None);
+    for token in line.split(' ').filter(|t| !t.is_empty()) {
+        let (k, v) = token.split_once('=').ok_or_else(bad)?;
+        match k {
+            "key" => key = Some(percent_decode(v)),
+            "exp" => exp = Some(v.parse::<i64>().map_err(|_| bad())?),
+            "la" => la = Some(v.parse::<u64>().map_err(|_| bad())?),
+            "fetch" => fetch = Some(v == "yes"),
+            "size" => size = Some(v.parse::<u64>().map_err(|_| bad())?),
+            "cls" => cls = Some(v.parse::<u32>().map_err(|_| bad())?),
+            _ => {} // cas, flags and fields added by later versions
+        }
+    }
+    Ok(DumpLine::Entry(DumpEntry {
+        key: key.ok_or_else(bad)?,
+        expires_at: exp.ok_or_else(bad)?.try_into().ok(),
+        last_access: la.ok_or_else(bad)?,
+        fetched: fetch.ok_or_else(bad)?,
+        size: size.ok_or_else(bad)?,
+        slab_class: cls.ok_or_else(bad)?,
+    }))
+}
+
 /// Single-line replies to storage/touch/delete/arith commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -345,6 +431,55 @@ mod tests {
             Err(ProtocolError::Server(_))
         ));
         assert!(parse_meta_get("VALUE x").is_err());
+    }
+
+    #[test]
+    fn parses_metadump_lines() {
+        // 1.6 format, with the trailing `flags=` field and a trailing space.
+        let l =
+            "key=user%3A1%3Aprofile exp=-1 la=1792956136 cas=2 fetch=no cls=1 size=77 flags=0 \r\n";
+        assert_eq!(
+            parse_dump_line(l).unwrap(),
+            DumpLine::Entry(DumpEntry {
+                key: "user:1:profile".into(),
+                expires_at: None,
+                last_access: 1792956136,
+                fetched: false,
+                size: 77,
+                slab_class: 1,
+            })
+        );
+        // 1.5 format with a real expiry and a fetched item.
+        match parse_dump_line("key=a exp=1792956251 la=1 cas=6 fetch=yes cls=3 size=66\r\n")
+            .unwrap()
+        {
+            DumpLine::Entry(e) => assert_eq!(
+                (e.expires_at, e.fetched, e.slab_class),
+                (Some(1792956251), true, 3)
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(parse_dump_line("END\r\n").unwrap(), DumpLine::End);
+        assert_eq!(parse_dump_line("OK\r\n").unwrap(), DumpLine::Ok);
+        assert_eq!(
+            parse_dump_line("CLIENT_ERROR lru crawler disabled\r\n"),
+            Err(ProtocolError::Server(
+                "CLIENT_ERROR lru crawler disabled".into()
+            ))
+        );
+        assert!(parse_dump_line("key=a exp=x la=1 fetch=no cls=1 size=1").is_err());
+        assert!(parse_dump_line("key=a la=1 fetch=no cls=1 size=1").is_err()); // missing exp
+        assert!(parse_dump_line("garbage").is_err());
+    }
+
+    #[test]
+    fn percent_decoding_handles_edges() {
+        assert_eq!(percent_decode("a%3Ab%25c"), "a:b%c");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%4"), "%4");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%C3%A9"), "é");
+        assert_eq!(percent_decode(""), "");
     }
 
     #[test]

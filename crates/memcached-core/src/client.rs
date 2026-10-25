@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use memcached_protocol::text::{self, MetaGet, ProtocolError, Status, StoreCmd};
+use memcached_protocol::text::{
+    self, DumpEntry, DumpLine, MetaGet, ProtocolError, Status, StoreCmd,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -38,6 +40,15 @@ pub struct KeyInfo {
     /// Whether the item has been fetched since it was stored.
     pub hit_before: bool,
     pub cas: Option<u64>,
+}
+
+/// Result of [`Client::dump_keys`].
+#[derive(Debug, Clone)]
+pub struct KeySample {
+    pub entries: Vec<DumpEntry>,
+    /// True only if the server's `END` was seen. Reaching the entry limit counts as incomplete,
+    /// even when that was also the last item.
+    pub complete: bool,
 }
 
 pub struct Client {
@@ -165,6 +176,37 @@ impl Client {
                     hit_before: find('h') == Some("1"),
                     cas: find('c').and_then(|v| v.parse().ok()),
                 }))
+            }
+        }
+    }
+
+    /// Reads item metadata with `lru_crawler metadump`, stopping after `max_entries`.
+    ///
+    /// Takes the client by value: once enough entries are read the connection is dropped, which
+    /// ends the server-side dump (aborting it mid-way was observed to leave the server healthy).
+    /// Order is the crawler's, not random, so a partial sample is biased toward whatever it
+    /// visits first.
+    pub async fn dump_keys(mut self, max_entries: usize) -> Result<KeySample, ClientError> {
+        self.send(&text::encode_metadump()).await?;
+        let mut entries = Vec::new();
+        loop {
+            match text::parse_dump_line(&self.line().await?)? {
+                DumpLine::Ok => {}
+                DumpLine::End => {
+                    return Ok(KeySample {
+                        entries,
+                        complete: true,
+                    })
+                }
+                DumpLine::Entry(e) => {
+                    entries.push(e);
+                    if entries.len() >= max_entries {
+                        return Ok(KeySample {
+                            entries,
+                            complete: false,
+                        });
+                    }
+                }
             }
         }
     }

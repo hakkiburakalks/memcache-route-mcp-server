@@ -15,6 +15,8 @@
 
 Key metadata (TTL, last access, fetched-before, CAS) comes from `mg` on servers where the `mn` probe succeeds (1.6.x here); older servers report only flags and size.
 
+`lru_crawler metadump` (used by `sample_keys`) differs by version: 1.4.39 refuses it unless started with `-o lru_crawler`; 1.5.22 streams entries then `END`; 1.6.45 sends `OK` first and adds a `flags` field. Aborting a dump part-way left the server healthy in a manual test on 1.6.45.
+
 Capabilities are probed at runtime (`version`, `mn`), not inferred from the version number.
 
 ## Host platforms

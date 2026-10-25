@@ -26,6 +26,7 @@ struct MemcachedServer {
     allowlist: HashSet<String>,
     audit: Arc<Audit>,
     write_prefixes: Vec<String>,
+    allow_key_names: bool,
     /// mcrouter's own destination names -> addresses this server can reach.
     dest_map: Arc<BTreeMap<String, String>>,
     router: ToolRouter<Self>,
@@ -98,10 +99,14 @@ impl MemcachedServer {
         if std::env::var("MEMCACHED_MCP_ALLOW_WRITE").as_deref() == Ok("1") {
             router.merge(Self::write_router());
         }
+        if std::env::var("MEMCACHED_MCP_ALLOW_KEY_SAMPLING").as_deref() == Ok("1") {
+            router.merge(Self::inventory_router());
+        }
         Ok(Self {
             allowlist,
             audit: Arc::new(Audit::from_env()?),
             write_prefixes,
+            allow_key_names: std::env::var("MEMCACHED_MCP_ALLOW_KEY_NAMES").as_deref() == Ok("1"),
             dest_map: Arc::new(dest_map),
             router,
         })
@@ -383,6 +388,115 @@ struct TouchArgs {
     key: String,
     /// New time to live in seconds.
     ttl_seconds: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SampleArgs {
+    /// Server address as `host:port`; must be in the allowlist.
+    addr: String,
+    /// Only count keys starting with this prefix (applied after scanning).
+    prefix: Option<String>,
+    /// Character that separates the prefix from the rest of the key; defaults to `:`.
+    delimiter: Option<String>,
+    /// Stop after scanning this many items (default 10000, at most 100000).
+    max_scan: Option<usize>,
+    /// Also return individual keys. Needs MEMCACHED_MCP_ALLOW_KEY_NAMES=1.
+    include_keys: Option<bool>,
+    /// How many individual keys to return when include_keys is set (default 50, at most 500).
+    max_keys: Option<usize>,
+}
+
+const DEFAULT_SCAN: usize = 10_000;
+const MAX_SCAN: usize = 100_000;
+
+#[tool_router(router = inventory_router)]
+impl MemcachedServer {
+    #[tool(
+        description = "Sample what is stored in a memcached by walking its LRU crawler metadata dump (values are never read). Returns items, bytes and never-fetched counts per key prefix, plus individual keys only if enabled. Imposes crawler load, scans in the crawler's order rather than randomly (a partial scan is biased), and needs the LRU crawler enabled (off by default on 1.4).",
+        annotations(read_only_hint = true)
+    )]
+    async fn sample_keys(&self, Parameters(a): Parameters<SampleArgs>) -> Result<String, String> {
+        let want_keys = a.include_keys.unwrap_or(false);
+        if want_keys && !self.allow_key_names {
+            return Err("returning key names is disabled; set MEMCACHED_MCP_ALLOW_KEY_NAMES=1 on the server, or omit include_keys to get prefix totals only".to_owned());
+        }
+        let mut delim = a.delimiter.as_deref().unwrap_or(":").chars();
+        let (Some(delim), None) = (delim.next(), delim.next()) else {
+            return Err("delimiter must be exactly one character".to_owned());
+        };
+        let scan = a.max_scan.unwrap_or(DEFAULT_SCAN).clamp(1, MAX_SCAN);
+        let max_keys = a.max_keys.unwrap_or(50).min(500);
+
+        let c = self.connect(&a.addr).await?;
+        let sample = c.dump_keys(scan).await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("disabled") {
+                "the LRU crawler is disabled on this server; start memcached with `-o lru_crawler` to allow metadump".to_owned()
+            } else if msg.contains("ERROR") {
+                format!("this server does not support `lru_crawler metadump` ({msg})")
+            } else {
+                msg
+            }
+        })?;
+        self.audit.record(
+            "sample_keys",
+            &a.addr,
+            None,
+            &format!(
+                "scanned={} complete={} names_returned={want_keys}",
+                sample.entries.len(),
+                sample.complete
+            ),
+        );
+
+        let scanned = sample.entries.len();
+        let kept: Vec<_> = sample
+            .entries
+            .iter()
+            .filter(|e| a.prefix.as_deref().is_none_or(|p| e.key.starts_with(p)))
+            .collect();
+        let prefixes = diagnostics::inventory::summarize(
+            kept.iter().map(|e| diagnostics::inventory::Item {
+                key: &e.key,
+                size: e.size,
+                fetched: e.fetched,
+            }),
+            delim,
+        );
+        let never_fetched = kept.iter().filter(|e| !e.fetched).count();
+        let keys: Vec<_> = if want_keys {
+            kept.iter()
+                .take(max_keys)
+                .map(|e| {
+                    serde_json::json!({
+                        "key": e.key, "size": e.size, "fetched": e.fetched,
+                        "expires_at": e.expires_at, "last_access": e.last_access,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut notes = vec![
+            "size is the item's total size including overhead, not the value length".to_owned(),
+            "expires_at and last_access are unix times on the server's clock; last_access is updated lazily".to_owned(),
+        ];
+        if !sample.complete {
+            notes.push(format!(
+                "scan stopped after {scanned} items before reaching the end; the crawler does not visit items randomly, so these totals are not representative of the whole cache"
+            ));
+        }
+        serde_json::to_string_pretty(&serde_json::json!({
+            "scanned": scanned,
+            "complete": sample.complete,
+            "matched": kept.len(),
+            "never_fetched": never_fetched,
+            "prefixes": prefixes.iter().take(50).collect::<Vec<_>>(),
+            "keys": keys,
+            "notes": notes,
+        }))
+        .map_err(|e| e.to_string())
+    }
 }
 
 #[tool_router(router = write_router)]
