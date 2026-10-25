@@ -1,6 +1,7 @@
 //! MCP server for memcached. Read-only unless MEMCACHED_MCP_ALLOW_WRITE=1. Targets must be listed in MEMCACHED_MCP_ALLOWLIST.
 
 mod audit;
+mod http;
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -494,7 +495,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if server.router.has_route("set_key") && server.write_prefixes.is_empty() {
         eprintln!("warning: writes are enabled with no MEMCACHED_MCP_WRITE_PREFIX; any key on an allowlisted server can be written");
     }
-    let service = server.serve(stdio()).await?;
-    service.waiting().await?;
+    match http_bind_from_args()? {
+        Some(bind) => {
+            let cfg = http_config(bind)?;
+            let audit = server.audit.clone();
+            http::serve(server, audit, cfg).await?;
+        }
+        None => {
+            let service = server.serve(stdio()).await?;
+            service.waiting().await?;
+        }
+    }
     Ok(())
+}
+
+/// `--http <addr:port>` switches from stdio to Streamable HTTP.
+fn http_bind_from_args() -> Result<Option<std::net::SocketAddr>, String> {
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        None => Ok(None),
+        Some("--http") => {
+            let addr = args
+                .next()
+                .ok_or("--http needs an address, e.g. --http 127.0.0.1:8080")?;
+            addr.parse()
+                .map(Some)
+                .map_err(|e| format!("bad --http address '{addr}': {e}"))
+        }
+        Some(other) => Err(format!(
+            "unknown argument '{other}'; usage: memcached-mcp [--http ADDR:PORT]"
+        )),
+    }
+}
+
+/// Authentication is mandatory over HTTP, and plaintext is only allowed on loopback unless
+/// explicitly opted into (the bearer token would otherwise cross the network in the clear).
+fn http_config(bind: std::net::SocketAddr) -> Result<http::HttpConfig, String> {
+    let token = std::env::var("MEMCACHED_MCP_HTTP_TOKEN").unwrap_or_default();
+    if token.len() < http::MIN_TOKEN_LEN {
+        return Err(format!(
+            "set MEMCACHED_MCP_HTTP_TOKEN to a secret of at least {} characters",
+            http::MIN_TOKEN_LEN
+        ));
+    }
+    if !bind.ip().is_loopback()
+        && std::env::var("MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT").as_deref() != Ok("1")
+    {
+        return Err(format!(
+            "{bind} is not a loopback address and this server speaks plain HTTP; bind to 127.0.0.1 behind a TLS proxy, or set MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1 to accept the risk"
+        ));
+    }
+    let allowed_hosts = std::env::var("MEMCACHED_MCP_HTTP_ALLOWED_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Ok(http::HttpConfig {
+        bind,
+        token,
+        allowed_hosts,
+    })
 }

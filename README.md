@@ -9,6 +9,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 - **Read-only by default.** Write tools (`set_key`, `delete_key`, `touch_key`) are not even listed unless `MEMCACHED_MCP_ALLOW_WRITE=1`. There is no flush tool.
 - **Write prefixes.** With `MEMCACHED_MCP_WRITE_PREFIX` (comma-separated, e.g. `tmp:,scratch:`) writes are limited to keys starting with one of the prefixes; others are refused before any connection is made. Without it, any key on an allowlisted server can be written and the server warns at startup.
 - **Audit trail.** Writes and rejected targets are logged as JSON lines to `MEMCACHED_MCP_AUDIT_LOG` (or stderr). Key names and outcomes are recorded, never values. Reads are not audited.
+- **Authenticated over HTTP.** The HTTP transport requires a bearer token (see below); stdio relies on whoever can start the process.
 - **Allowlist.** The server only connects to `host:port` pairs listed in `MEMCACHED_MCP_ALLOWLIST` (comma-separated). With an empty list every target is rejected.
 - **No values.** `get_key_metadata` returns existence, flags and size, never the value.
 - **Capability probing.** Features are detected by asking the server (`version`, `mn`), not guessed from the version number.
@@ -30,6 +31,21 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | `set_key`, `delete_key`, `touch_key` | Writes; only with `MEMCACHED_MCP_ALLOW_WRITE=1` |
 
 Diagnostic thresholds are heuristics and have not been tuned on production traffic.
+
+## Remote use (Streamable HTTP)
+
+By default the server speaks MCP over stdio. For shared or remote use, run it as an HTTP service:
+
+```
+MEMCACHED_MCP_HTTP_TOKEN="<at least 24 random characters>" MEMCACHED_MCP_ALLOWLIST=... memcached-mcp --http 127.0.0.1:8080
+```
+
+The endpoint is `/mcp`. Clients must send `Authorization: Bearer <token>`; requests without it get 401 and are written to the audit log (peer address only, never the token).
+
+- The token is mandatory; the server refuses to start without one of at least 24 characters.
+- There is no TLS. Binding to anything other than loopback is refused unless `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`, because the token would cross the network in clear text. Put a TLS-terminating proxy in front and bind to loopback.
+- `Host` headers are checked against loopback names to block DNS rebinding. Behind a proxy, list the public hostnames in `MEMCACHED_MCP_HTTP_ALLOWED_HOSTS` (comma-separated).
+- One shared token means one identity: the audit log does not say which user did what. Per-user auth and RBAC are not implemented.
 
 ## mcrouter destinations
 

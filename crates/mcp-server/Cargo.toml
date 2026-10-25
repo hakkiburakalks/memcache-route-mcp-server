@@ -13,7 +13,8 @@ memcached-core = { path = "../memcached-core" }
 memcached-protocol = { path = "../memcached-protocol" }
 diagnostics = { path = "../diagnostics" }
 mcrouter = { path = "../mcrouter" }
-rmcp = { version = "3.7.0", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "3.7.0", features = ["server", "transport-io", "macros", "transport-streamable-http-server"] }
+axum = "0.8"
 tokio.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
