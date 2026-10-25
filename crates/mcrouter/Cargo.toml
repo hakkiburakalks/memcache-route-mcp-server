@@ -11,4 +11,5 @@ serde_json = "1"
 
 [dev-dependencies]
 memcached-core = { path = "../memcached-core" }
+memcached-protocol = { path = "../memcached-protocol" }
 tokio.workspace = true

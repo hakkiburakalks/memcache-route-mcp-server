@@ -242,6 +242,30 @@ impl MemcachedServer {
     }
 
     #[tool(
+        description = "Diagnose failover on an mcrouter: combines its running config (is there a failover handle?) with live stats (are destinations down?) and explains what that means for reads and writes.",
+        annotations(read_only_hint = true)
+    )]
+    async fn mcrouter_diagnose_failover(
+        &self,
+        Parameters(a): Parameters<Target>,
+    ) -> Result<String, String> {
+        let mut c = self.connect(&a.addr).await?;
+        let (_, raw) = c
+            .get(mcrouter::CONFIG_KEY.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("server returned no config; is this an mcrouter?")?;
+        let cfg = mcrouter::parse_config(&String::from_utf8(raw).map_err(|e| e.to_string())?)?;
+        let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+        let findings = mcrouter::diagnose_failover(&cfg, &stats);
+        serde_json::to_string_pretty(&serde_json::json!({
+            "has_failover": cfg.has_failover,
+            "findings": findings,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
         description = "Ask mcrouter which destination server a key would be routed to for an operation (get, set or delete). Nothing is read or written.",
         annotations(read_only_hint = true)
     )]
@@ -256,7 +280,10 @@ impl MemcachedServer {
         let mut c = self.connect(&a.addr).await?;
         let probe = mcrouter::route_key(op, &a.key);
         match c.get(probe.as_bytes()).await.map_err(|e| e.to_string())? {
-            Some((_, dest)) => Ok(format!("destination: {}", String::from_utf8_lossy(&dest))),
+            Some((_, dest)) => Ok(match mcrouter::interpret_route(&dest) {
+                mcrouter::RouteTrace::Destination { address } => format!("destination: {address}"),
+                mcrouter::RouteTrace::NoDestination => "destination: none. The key hashes to a destination that is marked down and the route does not fail over: writes will fail and reads will look like misses.".to_owned(),
+            }),
             None => Err("mcrouter returned no route; is this an mcrouter?".to_owned()),
         }
     }

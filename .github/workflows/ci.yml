@@ -59,8 +59,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Start mcrouter with two memcached backends
         run: |
-          docker compose -f tests/compat/docker-compose.yml up -d mcrouter
+          docker compose -f tests/compat/docker-compose.yml up -d mcrouter mcrouter-failover
           sleep 5
       - run: cargo test -p mcrouter --test live -- --nocapture
         env:
           MCROUTER_ADDR: 127.0.0.1:11218
+      - name: Stop mc-a, then check behaviour with a dead destination
+        run: |
+          docker compose -f tests/compat/docker-compose.yml stop mc-a
+          cargo test -p mcrouter --test failover -- --nocapture
+        env:
+          MCROUTER_PLAIN_ADDR: 127.0.0.1:11218
+          MCROUTER_FAILOVER_ADDR: 127.0.0.1:11222

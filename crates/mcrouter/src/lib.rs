@@ -26,6 +26,43 @@ pub struct ConfigSummary {
     pub pools: Vec<Pool>,
     /// Pool names the route tree refers to (`PoolRoute|name` or `"pool": "name"`).
     pub referenced_pools: Vec<String>,
+    /// Whether any route handle in the tree is a failover handle (`FailoverRoute`, ...).
+    pub has_failover: bool,
+}
+
+/// What `__mcrouter__.route(op,key)` answered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RouteTrace {
+    Destination {
+        address: String,
+    },
+    /// Empty answer. Seen when the key hashes to a destination that is marked down and nothing
+    /// fails over.
+    NoDestination,
+}
+
+pub fn interpret_route(raw: &[u8]) -> RouteTrace {
+    let s = String::from_utf8_lossy(raw);
+    let s = s.trim();
+    if s.is_empty() {
+        RouteTrace::NoDestination
+    } else {
+        RouteTrace::Destination {
+            address: s.to_owned(),
+        }
+    }
+}
+
+fn mentions_failover(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.contains("Failover"),
+        Value::Array(a) => a.iter().any(mentions_failover),
+        Value::Object(o) => o
+            .iter()
+            .any(|(k, x)| k.contains("Failover") || mentions_failover(x)),
+        _ => false,
+    }
 }
 
 fn finding(severity: Severity, code: &'static str, message: String) -> Finding {
@@ -81,14 +118,17 @@ pub fn parse_config(json: &str) -> Result<ConfigSummary, String> {
         }
     }
     let mut refs = BTreeSet::new();
+    let mut has_failover = false;
     for key in ["route", "routes"] {
         if let Some(r) = root.get(key) {
             collect_pool_refs(r, &mut refs);
+            has_failover |= mentions_failover(r);
         }
     }
     Ok(ConfigSummary {
         pools,
         referenced_pools: refs.into_iter().collect(),
+        has_failover,
     })
 }
 
@@ -136,6 +176,49 @@ pub fn analyze_config(cfg: &ConfigSummary) -> Vec<Finding> {
 
 fn num(stats: &BTreeMap<String, String>, key: &str) -> Option<u64> {
     stats.get(key)?.parse().ok()
+}
+
+/// Combines the config (is there a failover handle?) with live stats (is anything down?).
+///
+/// Behaviour behind the wording was observed on mcrouter 34 with a plain `PoolRoute`: once a
+/// destination is down, writes to its keys fail with `SERVER_ERROR` while reads return `END`,
+/// which looks like an ordinary miss.
+pub fn diagnose_failover(cfg: &ConfigSummary, stats: &BTreeMap<String, String>) -> Vec<Finding> {
+    let total = num(stats, "num_servers").unwrap_or(0);
+    let down = num(stats, "num_servers_down").unwrap_or(0);
+    let mut out = Vec::new();
+    match (down > 0, cfg.has_failover) {
+        (true, false) => out.push(finding(
+            Severity::Critical,
+            "down_without_failover",
+            format!(
+                "{down} of {total} destinations are down and the route has no failover handle: \
+                 writes to their keys fail and reads come back as misses, so the hit ratio drops without errors"
+            ),
+        )),
+        (true, true) => {
+            out.push(finding(
+                Severity::Warning,
+                "failover_active",
+                format!("{down} of {total} destinations are down; the route has a failover handle, so their keys should be served by the fallback"),
+            ));
+            if total > 0 && down * 2 >= total {
+                out.push(finding(
+                    Severity::Warning,
+                    "failover_capacity",
+                    "half or more of the destinations are down; the remaining servers may be overloaded".into(),
+                ));
+            }
+        }
+        (false, false) => out.push(finding(
+            Severity::Info,
+            "no_failover_configured",
+            "the route has no failover handle; losing any destination will fail writes and turn reads into misses for its keys".into(),
+        )),
+        (false, true) => {}
+    }
+    out.sort_by_key(|f| std::cmp::Reverse(f.severity));
+    out
 }
 
 /// Health checks from mcrouter `stats`.
@@ -240,6 +323,70 @@ mod tests {
         ]));
         assert_eq!(codes(&some), ["destinations_down", "destinations_suspect"]);
         assert!(analyze_stats(&s(&[("num_servers", "2"), ("num_servers_down", "0")])).is_empty());
+    }
+
+    #[test]
+    fn detects_failover_handles() {
+        let plain =
+            parse_config(r#"{"pools":{"p":{"servers":["a:1"]}},"route":"PoolRoute|p"}"#).unwrap();
+        assert!(!plain.has_failover);
+        let fo = parse_config(
+            r#"{"pools":{"a":{"servers":["a:1"]},"b":{"servers":["b:1"]}},
+                "route":{"type":"FailoverRoute","children":["PoolRoute|a","PoolRoute|b"]}}"#,
+        )
+        .unwrap();
+        assert!(fo.has_failover);
+        let nested = parse_config(r#"{"route":{"type":"PrefixSelectorRoute","policies":{"x":"FailoverWithExptimeRoute|a"}}}"#).unwrap();
+        assert!(nested.has_failover);
+    }
+
+    #[test]
+    fn failover_diagnosis_matrix() {
+        let s = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect()
+        };
+        let cfg = |failover| ConfigSummary {
+            pools: vec![],
+            referenced_pools: vec![],
+            has_failover: failover,
+        };
+        let down1 = s(&[("num_servers", "3"), ("num_servers_down", "1")]);
+        let down2 = s(&[("num_servers", "3"), ("num_servers_down", "2")]);
+        let healthy = s(&[("num_servers", "3"), ("num_servers_down", "0")]);
+
+        let f = diagnose_failover(&cfg(false), &down1);
+        assert_eq!(
+            (f[0].code, f[0].severity),
+            ("down_without_failover", Severity::Critical)
+        );
+        assert_eq!(
+            codes(&diagnose_failover(&cfg(true), &down1)),
+            ["failover_active"]
+        );
+        assert_eq!(
+            codes(&diagnose_failover(&cfg(true), &down2)),
+            ["failover_active", "failover_capacity"]
+        );
+        assert_eq!(
+            codes(&diagnose_failover(&cfg(false), &healthy)),
+            ["no_failover_configured"]
+        );
+        assert!(diagnose_failover(&cfg(true), &healthy).is_empty());
+    }
+
+    #[test]
+    fn interprets_route_answers() {
+        assert_eq!(
+            interpret_route(b"mc-b:11211"),
+            RouteTrace::Destination {
+                address: "mc-b:11211".into()
+            }
+        );
+        assert_eq!(interpret_route(b""), RouteTrace::NoDestination);
+        assert_eq!(interpret_route(b" \r\n"), RouteTrace::NoDestination);
     }
 
     #[test]

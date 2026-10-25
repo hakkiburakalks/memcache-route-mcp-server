@@ -1,0 +1,10 @@
+{
+  "pools": {
+    "primary": { "servers": ["mc-a:11211"] },
+    "backup": { "servers": ["mc-b:11211"] }
+  },
+  "route": {
+    "type": "FailoverRoute",
+    "children": ["PoolRoute|primary", "PoolRoute|backup"]
+  }
+}

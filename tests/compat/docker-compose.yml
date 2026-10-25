@@ -25,3 +25,10 @@ services:
     volumes: ["./mcrouter.json:/etc/mcrouter.json:ro"]
     ports: ["11218:5000"]
     depends_on: [mc-a, mc-b]
+  # mcrouter with a FailoverRoute (primary mc-a, backup mc-b); host port 11222.
+  mcrouter-failover:
+    image: mcrouter/mcrouter
+    command: ["mcrouter", "--config-file=/etc/mcrouter.json", "-p", "5000"]
+    volumes: ["./mcrouter-failover.json:/etc/mcrouter.json:ro"]
+    ports: ["11222:5000"]
+    depends_on: [mc-a, mc-b]

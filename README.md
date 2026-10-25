@@ -24,7 +24,8 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | `compare_nodes` | Outlier item counts and hit ratios across 3+ nodes |
 | `mcrouter_get_stats` | mcrouter stats and destination health |
 | `mcrouter_inspect_config` | Running mcrouter config: pools, servers, config problems |
-| `mcrouter_trace_key_route` | Which destination a key routes to (asks mcrouter itself) |
+| `mcrouter_diagnose_failover` | Is there a failover handle, is anything down, and what that means for reads and writes |
+| `mcrouter_trace_key_route` | Which destination a key routes to (asks mcrouter itself); says so when the destination is down |
 | `set_key`, `delete_key`, `touch_key` | Writes; only with `MEMCACHED_MCP_ALLOW_WRITE=1` |
 
 Diagnostic thresholds are heuristics and have not been tuned on production traffic.
