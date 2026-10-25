@@ -8,3 +8,6 @@ license.workspace = true
 memcached-protocol = { path = "../memcached-protocol" }
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+diagnostics = { path = "../diagnostics" }

@@ -43,3 +43,10 @@ jobs:
       - run: cargo test -p memcached-core --test live -- --nocapture
         env:
           MEMCACHED_ADDR: 127.0.0.1:11211
+      - name: Start 4 MB memcached for the eviction test
+        run: |
+          docker run -d --name small -p 11217:11211 memcached:${{ matrix.version }} -m 4
+          sleep 2
+      - run: cargo test -p memcached-core --test eviction -- --nocapture
+        env:
+          MEMCACHED_SMALL_ADDR: 127.0.0.1:11217

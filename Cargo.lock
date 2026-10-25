@@ -322,6 +322,7 @@ dependencies = [
 name = "memcached-core"
 version = "0.1.0"
 dependencies = [
+ "diagnostics",
  "memcached-protocol",
  "thiserror",
  "tokio",

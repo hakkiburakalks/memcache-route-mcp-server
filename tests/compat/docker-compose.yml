@@ -9,3 +9,8 @@ services:
   mc16:
     image: memcached:1.6
     ports: ["11216:11211"]
+  # 4 MB limit so the eviction test can fill it quickly.
+  mc-small:
+    image: memcached:1.6
+    command: ["-m", "4"]
+    ports: ["11217:11211"]

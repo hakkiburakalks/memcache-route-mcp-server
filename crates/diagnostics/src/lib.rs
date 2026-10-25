@@ -150,6 +150,15 @@ fn check_eviction_skew(items: &Stats, out: &mut Vec<Finding>) {
     if total < 100 {
         return;
     }
+    // With a single populated class all evictions land there by construction, so skew says nothing.
+    // Servers that omit `number` are not judged either.
+    let populated = per_slab(items, "number")
+        .iter()
+        .filter(|(_, n)| *n > 0)
+        .count();
+    if populated < 2 {
+        return;
+    }
     if let Some((slab, n)) = evicted.iter().max_by_key(|(_, n)| *n) {
         if *n as f64 / total as f64 >= 0.8 {
             out.push(finding(
@@ -306,8 +315,15 @@ mod tests {
             ("items:5:evicted", "50"),
             ("items:7:evicted", "50"),
         ]);
+        let with_populated = |base: &Stats| -> Stats {
+            let mut m = base.clone();
+            for slab in ["3", "5", "7"] {
+                m.insert(format!("items:{slab}:number"), "10".into());
+            }
+            m
+        };
         assert_eq!(
-            codes(&analyze_node(&none, &skewed, &none)),
+            codes(&analyze_node(&none, &with_populated(&skewed), &none)),
             ["eviction_skew"]
         );
         let even = st(&[
@@ -315,7 +331,10 @@ mod tests {
             ("items:5:evicted", "300"),
             ("items:7:evicted", "300"),
         ]);
-        assert!(analyze_node(&none, &even, &none).is_empty());
+        assert!(analyze_node(&none, &with_populated(&even), &none).is_empty());
+        // Only one populated class: everything evicts there by construction.
+        let single = st(&[("items:3:evicted", "900"), ("items:3:number", "10")]);
+        assert!(analyze_node(&none, &single, &none).is_empty());
     }
 
     #[test]
