@@ -6,6 +6,9 @@ use serde::Serialize;
 
 pub type Stats = BTreeMap<String, String>;
 
+/// Item-count outliers are only reported when the larger of the two counts reaches this.
+const MIN_ITEMS_FOR_OUTLIER: u64 = 100;
+
 /// Below this many gets the hit ratio says little.
 const MIN_GETS_FOR_RATIO: u64 = 1_000;
 
@@ -200,7 +203,8 @@ pub fn compare_nodes(nodes: &[NodeSummary<'_>]) -> Vec<Finding> {
             for n in nodes {
                 if let Some(c) = num(n.stats, "curr_items") {
                     let r = c as f64 / median as f64;
-                    if !(0.5..=2.0).contains(&r) {
+                    // Ratios of tiny counts are noise; both sides small means nothing to report.
+                    if c.max(median) >= MIN_ITEMS_FOR_OUTLIER && !(0.5..=2.0).contains(&r) {
                         out.push(finding(
                             Severity::Warning,
                             "item_count_outlier",
@@ -335,6 +339,46 @@ mod tests {
         // Only one populated class: everything evicts there by construction.
         let single = st(&[("items:3:evicted", "900"), ("items:3:number", "10")]);
         assert!(analyze_node(&none, &single, &none).is_empty());
+    }
+
+    #[test]
+    fn compare_ignores_ratios_of_tiny_counts_but_not_extremes() {
+        let mk = |n: &str| st(&[("curr_items", n)]);
+        let (a, b, c) = (mk("6"), mk("14"), mk("14"));
+        let tiny = [
+            NodeSummary {
+                name: "a",
+                stats: &a,
+            },
+            NodeSummary {
+                name: "b",
+                stats: &b,
+            },
+            NodeSummary {
+                name: "c",
+                stats: &c,
+            },
+        ];
+        assert!(compare_nodes(&tiny).is_empty());
+
+        let big = mk("3010");
+        let skewed = [
+            NodeSummary {
+                name: "a",
+                stats: &a,
+            },
+            NodeSummary {
+                name: "b",
+                stats: &b,
+            },
+            NodeSummary {
+                name: "c",
+                stats: &big,
+            },
+        ];
+        let f = compare_nodes(&skewed);
+        assert_eq!(codes(&f), ["item_count_outlier"]);
+        assert!(f[0].message.starts_with("c:"));
     }
 
     #[test]

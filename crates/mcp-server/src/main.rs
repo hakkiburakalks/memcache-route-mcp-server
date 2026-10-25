@@ -2,7 +2,7 @@
 
 mod audit;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +25,8 @@ struct MemcachedServer {
     allowlist: HashSet<String>,
     audit: Arc<Audit>,
     write_prefixes: Vec<String>,
+    /// mcrouter's own destination names -> addresses this server can reach.
+    dest_map: Arc<BTreeMap<String, String>>,
     router: ToolRouter<Self>,
 }
 
@@ -83,6 +85,14 @@ impl MemcachedServer {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect();
+        let dest_map =
+            mcrouter::parse_dest_map(&std::env::var("MEMCACHED_MCP_DEST_MAP").unwrap_or_default())
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("MEMCACHED_MCP_DEST_MAP: {e}"),
+                    )
+                })?;
         let mut router = Self::tool_router();
         if std::env::var("MEMCACHED_MCP_ALLOW_WRITE").as_deref() == Ok("1") {
             router.merge(Self::write_router());
@@ -91,6 +101,7 @@ impl MemcachedServer {
             allowlist,
             audit: Arc::new(Audit::from_env()?),
             write_prefixes,
+            dest_map: Arc::new(dest_map),
             router,
         })
     }
@@ -239,6 +250,66 @@ impl MemcachedServer {
         let findings = mcrouter::analyze_config(&cfg);
         serde_json::to_string_pretty(&serde_json::json!({ "config": cfg, "findings": findings }))
             .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Inspect and compare the memcached servers behind an mcrouter: reads the mcrouter's pools, then looks at each destination's own stats and flags outliers and per-node problems. mcrouter names destinations as it sees them, so MEMCACHED_MCP_DEST_MAP must map those names to reachable addresses (which must also be allowlisted); unmapped or unreachable destinations are reported, not guessed.",
+        annotations(read_only_hint = true)
+    )]
+    async fn mcrouter_compare_destinations(
+        &self,
+        Parameters(a): Parameters<Target>,
+    ) -> Result<String, String> {
+        let mut router = self.connect(&a.addr).await?;
+        let (_, raw) = router
+            .get(mcrouter::CONFIG_KEY.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("server returned no config; is this an mcrouter?")?;
+        let cfg = mcrouter::parse_config(&String::from_utf8(raw).map_err(|e| e.to_string())?)?;
+
+        let mut unmapped = Vec::new();
+        let mut unreachable = Vec::new();
+        let mut collected = Vec::new();
+        for dest in mcrouter::destinations(&cfg) {
+            let Some(real) = self.dest_map.get(&dest) else {
+                unmapped.push(dest);
+                continue;
+            };
+            let res = async {
+                let mut c = self.connect(real).await?;
+                let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+                let items = c.stats(Some("items")).await.unwrap_or_default();
+                let settings = c.stats(Some("settings")).await.unwrap_or_default();
+                Ok::<_, String>((stats, items, settings))
+            }
+            .await;
+            match res {
+                Ok(data) => collected.push((dest, data)),
+                Err(e) => unreachable.push(format!("{dest} -> {real}: {e}")),
+            }
+        }
+
+        let nodes: Vec<_> = collected
+            .iter()
+            .map(|(name, (stats, _, _))| diagnostics::NodeSummary { name, stats })
+            .collect();
+        let comparison = diagnostics::compare_nodes(&nodes);
+        let per_node: BTreeMap<_, _> = collected
+            .iter()
+            .map(|(name, (stats, items, settings))| {
+                (name, diagnostics::analyze_node(stats, items, settings))
+            })
+            .filter(|(_, f)| !f.is_empty())
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({
+            "inspected": collected.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            "comparison": comparison,
+            "per_node": per_node,
+            "unmapped": unmapped,
+            "unreachable": unreachable,
+        }))
+        .map_err(|e| e.to_string())
     }
 
     #[tool(

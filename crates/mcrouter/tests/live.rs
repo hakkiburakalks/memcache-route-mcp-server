@@ -1,4 +1,4 @@
-//! Runs against the mcrouter from tests/compat/docker-compose.yml (pools `main` = mc-a, mc-b).
+//! Runs against the mcrouter from tests/compat/docker-compose.yml (pool `main` = mc-a, mc-b, mc-c).
 //! Set MCROUTER_ADDR (e.g. 127.0.0.1:11218); skipped otherwise.
 
 use std::time::Duration;
@@ -22,7 +22,10 @@ async fn reads_config_and_traces_routes() {
         .expect("config");
     let cfg = mcrouter::parse_config(std::str::from_utf8(&raw).unwrap()).unwrap();
     assert_eq!(cfg.pools.len(), 1);
-    assert_eq!(cfg.pools[0].servers, ["mc-a:11211", "mc-b:11211"]);
+    assert_eq!(
+        cfg.pools[0].servers,
+        ["mc-a:11211", "mc-b:11211", "mc-c:11211"]
+    );
     assert!(mcrouter::analyze_config(&cfg).is_empty());
 
     // Routing is deterministic and lands on a configured server.

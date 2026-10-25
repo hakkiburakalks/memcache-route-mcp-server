@@ -132,6 +132,36 @@ pub fn parse_config(json: &str) -> Result<ConfigSummary, String> {
     })
 }
 
+/// Every distinct server named in `pools`, in first-seen order.
+pub fn destinations(cfg: &ConfigSummary) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    cfg.pools
+        .iter()
+        .flat_map(|p| p.servers.iter())
+        .filter(|s| seen.insert(s.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Parses `internal=reachable,internal2=reachable2`. mcrouter names destinations as it sees
+/// them (often container or service names); this maps them to addresses we can connect to.
+pub fn parse_dest_map(spec: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut map = BTreeMap::new();
+    for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (from, to) = pair
+            .split_once('=')
+            .map(|(a, b)| (a.trim(), b.trim()))
+            .filter(|(a, b)| !a.is_empty() && !b.is_empty())
+            .ok_or_else(|| {
+                format!("bad destination mapping '{pair}'; expected internal=reachable")
+            })?;
+        if map.insert(from.to_owned(), to.to_owned()).is_some() {
+            return Err(format!("destination '{from}' is mapped twice"));
+        }
+    }
+    Ok(map)
+}
+
 /// Structural checks on a parsed config.
 pub fn analyze_config(cfg: &ConfigSummary) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -387,6 +417,26 @@ mod tests {
         );
         assert_eq!(interpret_route(b""), RouteTrace::NoDestination);
         assert_eq!(interpret_route(b" \r\n"), RouteTrace::NoDestination);
+    }
+
+    #[test]
+    fn lists_distinct_destinations() {
+        let c = parse_config(
+            r#"{"pools":{"a":{"servers":["x:1","y:1"]},"b":{"servers":["y:1","z:1","x:1"]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(destinations(&c), ["x:1", "y:1", "z:1"]);
+    }
+
+    #[test]
+    fn parses_destination_map() {
+        let m = parse_dest_map(" mc-a:11211=127.0.0.1:1 , mc-b:11211=127.0.0.1:2,").unwrap();
+        assert_eq!(m["mc-a:11211"], "127.0.0.1:1");
+        assert_eq!(m.len(), 2);
+        assert!(parse_dest_map("").unwrap().is_empty());
+        assert!(parse_dest_map("novalue").is_err());
+        assert!(parse_dest_map("a=").is_err());
+        assert!(parse_dest_map("a=b,a=c").is_err());
     }
 
     #[test]

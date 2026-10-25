@@ -24,11 +24,23 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | `compare_nodes` | Outlier item counts and hit ratios across 3+ nodes |
 | `mcrouter_get_stats` | mcrouter stats and destination health |
 | `mcrouter_inspect_config` | Running mcrouter config: pools, servers, config problems |
+| `mcrouter_compare_destinations` | Looks at each memcached behind an mcrouter and flags outliers and per-node problems (needs `MEMCACHED_MCP_DEST_MAP`) |
 | `mcrouter_diagnose_failover` | Is there a failover handle, is anything down, and what that means for reads and writes |
 | `mcrouter_trace_key_route` | Which destination a key routes to (asks mcrouter itself); says so when the destination is down |
 | `set_key`, `delete_key`, `touch_key` | Writes; only with `MEMCACHED_MCP_ALLOW_WRITE=1` |
 
 Diagnostic thresholds are heuristics and have not been tuned on production traffic.
+
+## mcrouter destinations
+
+mcrouter names its destinations as it sees them (often container or service names such as `mc-a:11211`), which this server may not be able to resolve. To inspect the memcached nodes behind an mcrouter, map those names to reachable addresses, and allowlist the addresses too:
+
+```
+MEMCACHED_MCP_DEST_MAP="mc-a:11211=10.0.1.5:11211,mc-b:11211=10.0.1.6:11211"
+MEMCACHED_MCP_ALLOWLIST="10.0.0.9:5000,10.0.1.5:11211,10.0.1.6:11211"
+```
+
+Destinations without a mapping are reported as `unmapped` rather than guessed.
 
 ## Install
 
