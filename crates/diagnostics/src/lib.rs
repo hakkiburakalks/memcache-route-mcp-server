@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+pub mod prometheus;
+
 pub type Stats = BTreeMap<String, String>;
 
 /// Item-count outliers are only reported when the larger of the two counts reaches this.

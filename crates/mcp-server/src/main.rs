@@ -497,7 +497,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     match http_bind_from_args()? {
         Some(bind) => {
-            let cfg = http_config(bind)?;
+            let cfg = http_config(bind, &server.allowlist)?;
             let audit = server.audit.clone();
             http::serve(server, audit, cfg).await?;
         }
@@ -530,7 +530,10 @@ fn http_bind_from_args() -> Result<Option<std::net::SocketAddr>, String> {
 
 /// Authentication is mandatory over HTTP, and plaintext is only allowed on loopback unless
 /// explicitly opted into (the bearer token would otherwise cross the network in the clear).
-fn http_config(bind: std::net::SocketAddr) -> Result<http::HttpConfig, String> {
+fn http_config(
+    bind: std::net::SocketAddr,
+    allowlist: &HashSet<String>,
+) -> Result<http::HttpConfig, String> {
     let token = std::env::var("MEMCACHED_MCP_HTTP_TOKEN").unwrap_or_default();
     if token.len() < http::MIN_TOKEN_LEN {
         return Err(format!(
@@ -552,9 +555,23 @@ fn http_config(bind: std::net::SocketAddr) -> Result<http::HttpConfig, String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect();
+    // /metrics must not become a way around the allowlist.
+    let metrics_targets: Vec<String> = std::env::var("MEMCACHED_MCP_METRICS_TARGETS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if let Some(bad) = metrics_targets.iter().find(|t| !allowlist.contains(*t)) {
+        return Err(format!(
+            "MEMCACHED_MCP_METRICS_TARGETS lists {bad}, which is not in MEMCACHED_MCP_ALLOWLIST"
+        ));
+    }
     Ok(http::HttpConfig {
         bind,
         token,
         allowed_hosts,
+        metrics_targets,
     })
 }

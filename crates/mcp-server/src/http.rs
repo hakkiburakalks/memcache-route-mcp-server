@@ -4,13 +4,16 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use axum::Router;
+use memcached_core::Client;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServerHandler;
@@ -25,6 +28,44 @@ pub struct HttpConfig {
     pub token: String,
     /// Extra `Host` values to accept besides loopback (for use behind a proxy).
     pub allowed_hosts: Vec<String>,
+    /// memcached servers exposed on `/metrics`. Empty disables the endpoint.
+    pub metrics_targets: Vec<String>,
+}
+
+const SCRAPE_TIMEOUT: Duration = Duration::from_secs(3);
+
+async fn scrape(addr: &str) -> Option<diagnostics::Stats> {
+    Client::connect(addr, SCRAPE_TIMEOUT)
+        .await
+        .ok()?
+        .stats(None)
+        .await
+        .ok()
+}
+
+/// Scrapes every target concurrently; an unreachable one is reported as `memcached_up 0`.
+async fn metrics(State(targets): State<Arc<Vec<String>>>) -> Response {
+    let mut set = tokio::task::JoinSet::new();
+    for (i, addr) in targets.iter().cloned().enumerate() {
+        set.spawn(async move {
+            let stats = scrape(&addr).await;
+            (i, addr, stats)
+        });
+    }
+    let mut nodes = Vec::new();
+    while let Some(Ok(node)) = set.join_next().await {
+        nodes.push(node);
+    }
+    nodes.sort_by_key(|(i, _, _)| *i);
+    let nodes: Vec<_> = nodes
+        .into_iter()
+        .map(|(_, addr, stats)| (addr, stats))
+        .collect();
+    (
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        diagnostics::prometheus::render(&nodes),
+    )
+        .into_response()
 }
 
 /// Compares without stopping at the first differing byte.
@@ -90,9 +131,15 @@ where
         token: Arc::new(cfg.token),
         audit,
     };
-    let app = Router::new()
-        .nest_service("/mcp", mcp)
-        .layer(middleware::from_fn_with_state(auth, require_token));
+    let mut app = Router::new().nest_service("/mcp", mcp);
+    if !cfg.metrics_targets.is_empty() {
+        let metrics_routes = Router::new()
+            .route("/metrics", get(metrics))
+            .with_state(Arc::new(cfg.metrics_targets));
+        app = app.merge(metrics_routes);
+    }
+    // Added last so it covers every route, /metrics included.
+    let app = app.layer(middleware::from_fn_with_state(auth, require_token));
 
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     eprintln!("listening on http://{}/mcp", listener.local_addr()?);

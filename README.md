@@ -47,6 +47,23 @@ The endpoint is `/mcp`. Clients must send `Authorization: Bearer <token>`; reque
 - `Host` headers are checked against loopback names to block DNS rebinding. Behind a proxy, list the public hostnames in `MEMCACHED_MCP_HTTP_ALLOWED_HOSTS` (comma-separated).
 - One shared token means one identity: the audit log does not say which user did what. Per-user auth and RBAC are not implemented.
 
+### Prometheus metrics
+
+In HTTP mode the server can also expose memcached counters at `/metrics`, so Prometheus keeps the history and you get trends and alerting without this project storing anything:
+
+```
+MEMCACHED_MCP_METRICS_TARGETS="10.0.1.5:11211,10.0.1.6:11211"   # each must also be in MEMCACHED_MCP_ALLOWLIST
+```
+
+```yaml
+scrape_configs:
+  - job_name: memcached
+    authorization: { credentials: "<the same token>" }
+    static_configs: [{ targets: ["127.0.0.1:8080"] }]
+```
+
+`/metrics` uses the same bearer token and is absent unless targets are configured. It exports raw counters and gauges (`memcached_get_hits_total`, `memcached_evictions_total`, `memcached_used_bytes`, ...) labelled by `instance`, plus `memcached_up` (0 when a target is unreachable). Ratios and rates are left to PromQL, e.g. `rate(memcached_get_hits_total[5m]) / (rate(memcached_get_hits_total[5m]) + rate(memcached_get_misses_total[5m]))`. Scrapes are not written to the audit log. mcrouter targets are not exported yet, only memcached servers. The output passes `promtool check metrics`.
+
 ## mcrouter destinations
 
 mcrouter names its destinations as it sees them (often container or service names such as `mc-a:11211`), which this server may not be able to resolve. To inspect the memcached nodes behind an mcrouter, map those names to reachable addresses, and allowlist the addresses too:
