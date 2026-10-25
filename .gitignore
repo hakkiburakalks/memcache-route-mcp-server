@@ -1,0 +1,4 @@
+target/
+.claude-flow/
+.serena/cache/
+.swarm/

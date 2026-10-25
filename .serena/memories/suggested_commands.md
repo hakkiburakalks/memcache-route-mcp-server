@@ -1,0 +1,3 @@
+- Dev shell is PowerShell on Windows (Bash tool also available); no `&&` in PowerShell 5.1.
+- Test: `cargo test` (workspace root). Lint: `cargo clippy --all-targets -- -D warnings`. Format: `cargo fmt`.
+- Integration tests need Docker (planned `tests/compat/docker-compose`); unit tests do not.

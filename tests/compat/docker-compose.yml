@@ -1,0 +1,11 @@
+# One container per memcached version; host ports 11214 / 11215 / 11216.
+services:
+  mc14:
+    image: memcached:1.4
+    ports: ["11214:11211"]
+  mc15:
+    image: memcached:1.5
+    ports: ["11215:11211"]
+  mc16:
+    image: memcached:1.6
+    ports: ["11216:11211"]

@@ -1,0 +1,10 @@
+[package]
+name = "memcached-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memcached-protocol = { path = "../memcached-protocol" }
+thiserror.workspace = true
+tokio.workspace = true
