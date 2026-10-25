@@ -24,6 +24,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: cargo build --release -p mcp-server
+      - run: bash scripts/smoke.sh target/release/memcached-mcp
 
   compat:
     name: memcached ${{ matrix.version }}
