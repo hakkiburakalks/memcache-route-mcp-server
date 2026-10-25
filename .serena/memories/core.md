@@ -1,6 +1,6 @@
 # memcached-mcp-server
 
-Rust MCP server for Memcached/mcrouter ops + diagnostics. Repo: github.com/hakkiburakalks/memcached-mcp-server (private). Tag `v0.1.0-alpha.1` released; later work is untagged. Plan: `C:\Users\burak\.claude\plans\optimized-booping-rivest.md`.
+Rust MCP server for Memcached/mcrouter ops + diagnostics. Repo: github.com/hakkiburakalks/memcached-mcp-server (private). Tags `v0.1.0-alpha.1` and `v0.1.0-alpha.2` released (alpha.2 binaries predate the smoke test).
 
 ## Layout (crates under `crates/`)
 - `memcached-protocol`: pure codec, no I/O. `src/text.rs`: text protocol + `mg`/`mn` meta get. Binary protocol and SASL not written.
