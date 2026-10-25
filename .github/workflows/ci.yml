@@ -104,3 +104,11 @@ jobs:
           ! helm template t deploy/helm/memcached-mcp
           ! helm template t deploy/helm/memcached-mcp --set 'allowlist={a:11211}'
       - run: helm template t deploy/helm/memcached-mcp --set 'allowlist={a:11211}' --set auth.existingSecret=s --set auth.mode=token > /dev/null
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
