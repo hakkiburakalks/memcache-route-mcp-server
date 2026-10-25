@@ -31,6 +31,12 @@ struct StatsArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct CompareArgs {
+    /// Server addresses as `host:port`; each must be in the allowlist.
+    addrs: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct KeyArgs {
     /// Server address as `host:port`; must be in the allowlist.
     addr: String,
@@ -100,6 +106,52 @@ impl MemcachedServer {
             )),
             None => Ok("found: false".to_owned()),
         }
+    }
+
+    #[tool(
+        description = "Analyze one node: hit ratio, evictions vs memory, connection limits, eviction skew across slab classes. Returns findings ranked by severity.",
+        annotations(read_only_hint = true)
+    )]
+    async fn diagnose_node(&self, Parameters(a): Parameters<Target>) -> Result<String, String> {
+        let mut c = self.connect(&a.addr).await?;
+        let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+        // Older servers may lack these groups; the rules that need them are skipped.
+        let items = c.stats(Some("items")).await.unwrap_or_default();
+        let settings = c.stats(Some("settings")).await.unwrap_or_default();
+        let findings = diagnostics::analyze_node(&stats, &items, &settings);
+        serde_json::to_string_pretty(&findings).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Compare 3 or more nodes and flag outliers in item count and hit ratio. Unreachable nodes are reported and skipped.",
+        annotations(read_only_hint = true)
+    )]
+    async fn compare_nodes(
+        &self,
+        Parameters(a): Parameters<CompareArgs>,
+    ) -> Result<String, String> {
+        let mut collected = Vec::new();
+        let mut unreachable = Vec::new();
+        for addr in &a.addrs {
+            let res = match self.connect(addr).await {
+                Ok(mut c) => c.stats(None).await.map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            };
+            match res {
+                Ok(s) => collected.push((addr.as_str(), s)),
+                Err(e) => unreachable.push(format!("{addr}: {e}")),
+            }
+        }
+        let nodes: Vec<_> = collected
+            .iter()
+            .map(|(name, stats)| diagnostics::NodeSummary { name, stats })
+            .collect();
+        let findings = diagnostics::compare_nodes(&nodes);
+        serde_json::to_string_pretty(&serde_json::json!({
+            "findings": findings,
+            "unreachable": unreachable,
+        }))
+        .map_err(|e| e.to_string())
     }
 }
 
