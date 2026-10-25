@@ -1,9 +1,15 @@
-//! Read-only MCP server for memcached. Targets must be listed in MEMCACHED_MCP_ALLOWLIST.
+//! MCP server for memcached. Read-only unless MEMCACHED_MCP_ALLOW_WRITE=1. Targets must be listed in MEMCACHED_MCP_ALLOWLIST.
+
+mod audit;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
+use audit::Audit;
 use memcached_core::Client;
+use memcached_protocol::text::StoreCmd;
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_handler, tool_router, transport::stdio, ServiceExt};
 use schemars::JsonSchema;
@@ -11,9 +17,14 @@ use serde::Deserialize;
 
 const OP_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Largest value memcached accepts by default (1 MiB item size limit).
+const MAX_VALUE_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone)]
 struct MemcachedServer {
     allowlist: HashSet<String>,
+    audit: Arc<Audit>,
+    router: ToolRouter<Self>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -55,18 +66,30 @@ struct KeyArgs {
 }
 
 impl MemcachedServer {
-    fn from_env() -> Self {
+    /// Write tools are only registered when `MEMCACHED_MCP_ALLOW_WRITE=1`; otherwise they are
+    /// neither listed nor callable.
+    fn from_env() -> std::io::Result<Self> {
         let allowlist = std::env::var("MEMCACHED_MCP_ALLOWLIST")
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .collect();
-        Self { allowlist }
+        let mut router = Self::tool_router();
+        if std::env::var("MEMCACHED_MCP_ALLOW_WRITE").as_deref() == Ok("1") {
+            router.merge(Self::write_router());
+        }
+        Ok(Self {
+            allowlist,
+            audit: Arc::new(Audit::from_env()?),
+            router,
+        })
     }
 
     async fn connect(&self, addr: &str) -> Result<Client, String> {
         if !self.allowlist.contains(addr) {
+            self.audit
+                .record("connect", addr, None, "denied: not in allowlist");
             return Err(format!("{addr} is not in MEMCACHED_MCP_ALLOWLIST"));
         }
         Client::connect(addr, OP_TIMEOUT)
@@ -221,12 +244,113 @@ impl MemcachedServer {
     }
 }
 
-#[tool_handler(name = "memcached-mcp")]
+#[derive(Deserialize, JsonSchema)]
+struct SetArgs {
+    /// Server address as `host:port`; must be in the allowlist.
+    addr: String,
+    /// Key to write.
+    key: String,
+    /// Value to store (text, at most 1 MiB).
+    value: String,
+    /// Time to live in seconds; 0 or omitted means no expiry.
+    ttl_seconds: Option<i64>,
+    /// Opaque client flags; defaults to 0.
+    flags: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct TouchArgs {
+    /// Server address as `host:port`; must be in the allowlist.
+    addr: String,
+    /// Key to update.
+    key: String,
+    /// New time to live in seconds.
+    ttl_seconds: i64,
+}
+
+#[tool_router(router = write_router)]
+impl MemcachedServer {
+    #[tool(
+        description = "WRITES to the cache: store a value under a key, replacing any existing value.",
+        annotations(read_only_hint = false, destructive_hint = true)
+    )]
+    async fn set_key(&self, Parameters(a): Parameters<SetArgs>) -> Result<String, String> {
+        let ttl = a.ttl_seconds.unwrap_or(0);
+        if ttl < 0 {
+            return Err("ttl_seconds must not be negative".to_owned());
+        }
+        if a.value.len() > MAX_VALUE_BYTES {
+            return Err(format!(
+                "value is {} bytes; the limit is {MAX_VALUE_BYTES}",
+                a.value.len()
+            ));
+        }
+        let mut c = self.connect(&a.addr).await?;
+        let res = c
+            .store(
+                StoreCmd::Set,
+                a.key.as_bytes(),
+                a.flags.unwrap_or(0),
+                ttl,
+                a.value.as_bytes(),
+            )
+            .await
+            .map(|s| format!("{s:?}"))
+            .map_err(|e| e.to_string());
+        self.audit_result("set_key", &a.addr, &a.key, &res);
+        res
+    }
+
+    #[tool(
+        description = "WRITES to the cache: delete a key.",
+        annotations(read_only_hint = false, destructive_hint = true)
+    )]
+    async fn delete_key(&self, Parameters(a): Parameters<KeyArgs>) -> Result<String, String> {
+        let mut c = self.connect(&a.addr).await?;
+        let res = c
+            .delete(a.key.as_bytes())
+            .await
+            .map(|s| format!("{s:?}"))
+            .map_err(|e| e.to_string());
+        self.audit_result("delete_key", &a.addr, &a.key, &res);
+        res
+    }
+
+    #[tool(
+        description = "WRITES to the cache: change a key's time to live without touching its value.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn touch_key(&self, Parameters(a): Parameters<TouchArgs>) -> Result<String, String> {
+        if a.ttl_seconds < 0 {
+            return Err("ttl_seconds must not be negative".to_owned());
+        }
+        let mut c = self.connect(&a.addr).await?;
+        let res = c
+            .touch(a.key.as_bytes(), a.ttl_seconds)
+            .await
+            .map(|s| format!("{s:?}"))
+            .map_err(|e| e.to_string());
+        self.audit_result("touch_key", &a.addr, &a.key, &res);
+        res
+    }
+}
+
+impl MemcachedServer {
+    fn audit_result(&self, tool: &str, addr: &str, key: &str, res: &Result<String, String>) {
+        let outcome = match res {
+            Ok(s) => format!("ok: {s}"),
+            Err(e) => format!("error: {e}"),
+        };
+        self.audit.record(tool, addr, Some(key), &outcome);
+    }
+}
+
+#[tool_handler(router = self.router, name = "memcached-mcp")]
 impl rmcp::ServerHandler for MemcachedServer {}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server = MemcachedServer::from_env();
+    let server = MemcachedServer::from_env()?;
     if server.allowlist.is_empty() {
         eprintln!("warning: MEMCACHED_MCP_ALLOWLIST is empty; every target will be rejected");
     }

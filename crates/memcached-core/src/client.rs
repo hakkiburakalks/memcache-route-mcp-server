@@ -115,6 +115,16 @@ impl Client {
         Ok(text::parse_status_line(&self.line().await?)?)
     }
 
+    pub async fn delete(&mut self, key: &[u8]) -> Result<Status, ClientError> {
+        self.send(&text::encode_delete(key)?).await?;
+        Ok(text::parse_status_line(&self.line().await?)?)
+    }
+
+    pub async fn touch(&mut self, key: &[u8], exptime: i64) -> Result<Status, ClientError> {
+        self.send(&text::encode_touch(key, exptime)?).await?;
+        Ok(text::parse_status_line(&self.line().await?)?)
+    }
+
     /// Probes the server: `version`, then `mn` to detect meta command support.
     pub async fn probe(&mut self) -> Result<Capabilities, ClientError> {
         let version = self.version().await?;

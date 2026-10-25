@@ -110,6 +110,14 @@ pub fn encode_touch(key: &[u8], exptime: i64) -> Result<Vec<u8>, ProtocolError> 
     Ok(out)
 }
 
+pub fn encode_delete(key: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+    validate_key(key)?;
+    let mut out = b"delete ".to_vec();
+    out.extend_from_slice(key);
+    out.extend_from_slice(b"\r\n");
+    Ok(out)
+}
+
 /// `incr` (or `decr` when `incr` is false).
 pub fn encode_arith(key: &[u8], delta: u64, incr: bool) -> Result<Vec<u8>, ProtocolError> {
     validate_key(key)?;
@@ -263,6 +271,8 @@ mod tests {
     #[test]
     fn encodes_touch_arith_meta() {
         assert_eq!(encode_touch(b"k", 30).unwrap(), b"touch k 30\r\n");
+        assert_eq!(encode_delete(b"k").unwrap(), b"delete k\r\n");
+        assert!(encode_delete(b"bad key").is_err());
         assert_eq!(encode_arith(b"c", 5, true).unwrap(), b"incr c 5\r\n");
         assert_eq!(encode_arith(b"c", 5, false).unwrap(), b"decr c 5\r\n");
         assert_eq!(encode_meta_noop(), b"mn\r\n");

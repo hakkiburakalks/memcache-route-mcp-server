@@ -1,12 +1,13 @@
 # memcached-mcp
 
-A read-only [MCP](https://modelcontextprotocol.io) server for Memcached and mcrouter, written in Rust. It gives an AI assistant a safe way to inspect cache servers and diagnose problems.
+An [MCP](https://modelcontextprotocol.io) server for Memcached and mcrouter, written in Rust. It gives an AI assistant a safe way to inspect cache servers and diagnose problems. Read-only by default.
 
 Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually been tested.
 
 ## Safety model
 
-- **Read-only.** No tool writes, deletes or flushes.
+- **Read-only by default.** Write tools (`set_key`, `delete_key`, `touch_key`) are not even listed unless `MEMCACHED_MCP_ALLOW_WRITE=1`. There is no flush tool.
+- **Audit trail.** Writes and rejected targets are logged as JSON lines to `MEMCACHED_MCP_AUDIT_LOG` (or stderr). Key names and outcomes are recorded, never values. Reads are not audited.
 - **Allowlist.** The server only connects to `host:port` pairs listed in `MEMCACHED_MCP_ALLOWLIST` (comma-separated). With an empty list every target is rejected.
 - **No values.** `get_key_metadata` returns existence, flags and size, never the value.
 - **Capability probing.** Features are detected by asking the server (`version`, `mn`), not guessed from the version number.
@@ -23,6 +24,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | `mcrouter_get_stats` | mcrouter stats and destination health |
 | `mcrouter_inspect_config` | Running mcrouter config: pools, servers, config problems |
 | `mcrouter_trace_key_route` | Which destination a key routes to (asks mcrouter itself) |
+| `set_key`, `delete_key`, `touch_key` | Writes; only with `MEMCACHED_MCP_ALLOW_WRITE=1` |
 
 Diagnostic thresholds are heuristics and have not been tuned on production traffic.
 
