@@ -1,3 +1,5 @@
-- Dev shell is PowerShell on Windows (Bash tool also available); no `&&` in PowerShell 5.1.
-- Test: `cargo test` (workspace root). Lint: `cargo clippy --all-targets -- -D warnings`. Format: `cargo fmt`.
-- Integration tests need Docker (planned `tests/compat/docker-compose`); unit tests do not.
+- Dev shell is PowerShell on Windows (Bash tool also available); no `&&` in PowerShell 5.1. In the Bash tool, large heredocs containing quotes/backticks have failed with "unexpected EOF": write files with the Write tool instead.
+- Test: `cargo test` (workspace root). Lint: `cargo clippy --all-targets -- -D warnings`. Format: `cargo fmt`. Run `cargo fmt` before Serena `replace_content` on files it has already formatted; fmt rewraps code, so literal needles from earlier text stop matching.
+- Live tests: `docker compose -f tests/compat/docker-compose.yml up -d`, then set the env vars listed in `mem:core`. Failover test needs `docker compose ... stop mc-a` first. `down` when finished.
+- Drive the stdio server by hand: pipe JSON-RPC lines into `target/debug/memcached-mcp.exe` with `MEMCACHED_MCP_ALLOWLIST` set; `sleep` between calls.
+- CI status: `gh run list --workflow ci --limit 1`, `gh run watch <id>`, `gh run view <id> --json jobs`.

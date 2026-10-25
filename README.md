@@ -11,7 +11,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 - **Audit trail.** Writes and rejected targets are logged as JSON lines to `MEMCACHED_MCP_AUDIT_LOG` (or stderr). Key names and outcomes are recorded, never values. Reads are not audited.
 - **Authenticated over HTTP.** The HTTP transport requires a bearer token (see below); stdio relies on whoever can start the process.
 - **Allowlist.** The server only connects to `host:port` pairs listed in `MEMCACHED_MCP_ALLOWLIST` (comma-separated). With an empty list every target is rejected.
-- **No values.** `get_key_metadata` returns existence, flags and size, never the value.
+- **No values.** `get_key_metadata` returns metadata (existence, size, flags and, where supported, TTL and access info), never the value.
 - **Capability probing.** Features are detected by asking the server (`version`, `mn`), not guessed from the version number.
 
 ## Tools
@@ -30,7 +30,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | `mcrouter_trace_key_route` | Which destination a key routes to (asks mcrouter itself); says so when the destination is down |
 | `set_key`, `delete_key`, `touch_key` | Writes; only with `MEMCACHED_MCP_ALLOW_WRITE=1` |
 
-Diagnostic thresholds are heuristics and have not been tuned on production traffic.
+Diagnostic thresholds are heuristics and have not been tuned on production traffic. Looking up a key's metadata still counts in the server's global `get_hits`/`get_misses` totals, though it leaves the item's LRU position and fetched-before state alone.
 
 ## Remote use (Streamable HTTP)
 
@@ -100,6 +100,13 @@ Live tests are skipped unless pointed at a server. Start the test servers and se
 ```
 docker compose -f tests/compat/docker-compose.yml up -d
 MEMCACHED_ADDR=127.0.0.1:11216 MEMCACHED_SMALL_ADDR=127.0.0.1:11217 MCROUTER_ADDR=127.0.0.1:11218 cargo test
+```
+
+The dead-destination test needs `mc-a` stopped first (CI does this too):
+
+```
+docker compose -f tests/compat/docker-compose.yml stop mc-a
+MCROUTER_PLAIN_ADDR=127.0.0.1:11218 MCROUTER_FAILOVER_ADDR=127.0.0.1:11222 cargo test -p mcrouter --test failover
 ```
 
 Layout: `memcached-protocol` (codec, no I/O), `memcached-core` (client), `diagnostics` and `mcrouter` (pure analysis), `mcp-server` (the binary).

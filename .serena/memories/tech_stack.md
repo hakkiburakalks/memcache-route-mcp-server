@@ -1,5 +1,4 @@
-- Rust 1.95 (edition 2021), cargo workspace, resolver 2. Shared deps in `[workspace.dependencies]`.
-- Planned: tokio, rmcp (official Rust MCP SDK; stdio then Streamable HTTP).
-- Errors via `thiserror` 2.
-- Compat tests: Docker (28.x on dev box) running memcached 1.4/1.5/1.6 and mcrouter.
-- Release targets: x86_64/aarch64 linux-musl, x86_64/aarch64 apple-darwin, then windows-msvc.
+- Rust 1.95 (edition 2021), cargo workspace, resolver 2. Shared deps in `[workspace.dependencies]`; release profile: thin LTO + strip.
+- tokio, rmcp 3.7 (features: server, transport-io, macros, transport-streamable-http-server), axum 0.8 (HTTP mode only), serde/serde_json, schemars 1, thiserror 2.
+- Compat tests: Docker (memcached 1.4/1.5/1.6, mcrouter 34.0.0 image `mcrouter/mcrouter`). `promtool` (image `prom/prometheus`) was used once to validate `/metrics` output.
+- Release targets: x86_64/aarch64 linux-musl, x86_64/aarch64 apple-darwin, x86_64 windows-msvc.

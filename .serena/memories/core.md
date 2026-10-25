@@ -1,21 +1,28 @@
 # memcached-mcp-server
 
-Rust MCP server for Memcached/mcrouter ops + diagnostics. Plan: `C:\Users\burak\.claude\plans\optimized-booping-rivest.md`.
+Rust MCP server for Memcached/mcrouter ops + diagnostics. Repo: github.com/hakkiburakalks/memcached-mcp-server (private). Tag `v0.1.0-alpha.1` released; later work is untagged. Plan: `C:\Users\burak\.claude\plans\optimized-booping-rivest.md`.
 
-## Layout
-- Cargo workspace; crates under `crates/`.
-- `memcached-protocol`: pure codec (no I/O). Text protocol in `src/text.rs`. Meta/binary not yet written.
-- `memcached-core`: tokio `Client` (one connection, no pool yet), `probe()` for capabilities. Live test in `tests/live.rs` needs `MEMCACHED_ADDR`.
-- `diagnostics`: pure rules over `stats` maps (`analyze_node`, `compare_nodes`); thresholds are heuristics, tested with fixtures.
-- `mcp-server`: bin `memcached-mcp`, rmcp 3.7 stdio. Tools: server_info, get_stats, get_key_metadata, diagnose_node, compare_nodes. Targets must be in `MEMCACHED_MCP_ALLOWLIST`.
-- CI: `.github/workflows/ci.yml` (Linux+macOS build, memcached 1.4/1.5/1.6 matrix). `COMPATIBILITY.md` lists only CI-verified versions.
+## Layout (crates under `crates/`)
+- `memcached-protocol`: pure codec, no I/O. `src/text.rs`: text protocol + `mg`/`mn` meta get. Binary protocol and SASL not written.
+- `memcached-core`: tokio `Client` (one connection per call, deliberately no pool), `probe()` capabilities, `meta_info()` via `mg ... u`.
+- `diagnostics`: pure rules over `stats` maps (`analyze_node`, `compare_nodes`) + `prometheus::render`. Thresholds are heuristics.
+- `mcrouter`: pure analysis of mcrouter output (config via `__mcrouter__.preprocessed_config`, stats, failover diagnosis, route trace, `parse_dest_map`).
+- `mcp-server`: bin `memcached-mcp` (rmcp 3.7). stdio by default, `--http ADDR` for Streamable HTTP (`src/http.rs`, axum). `src/audit.rs` = JSON audit log.
+- Tests: unit tests inline; live tests are env-gated and skip when unset (`MEMCACHED_ADDR`, `MEMCACHED_SMALL_ADDR`, `MCROUTER_ADDR`, `MCROUTER_PLAIN_ADDR`+`MCROUTER_FAILOVER_ADDR`). Topology: `tests/compat/docker-compose.yml`.
+- CI `.github/workflows/ci.yml`: Linux+macOS build; memcached 1.4/1.5/1.6 matrix; mcrouter job (stops `mc-a` for the failover test). `release.yml`: 5 targets, tag `v*` publishes (tags containing `-` are prereleases).
 
 ## Invariants
-- Protocol crate stays I/O-free; policy (timeouts, allowlist, read-only) lives above it.
-- Capability detection by probing (`version`, `stats settings`, `mn`), never by version number alone.
-- Read-only by default; write tools only registered when `MEMCACHED_MCP_ALLOW_WRITE=1` (hidden and uncallable otherwise). Writes + denied targets go to the audit log (`MEMCACHED_MCP_AUDIT_LOG`, else stderr; stdout is the MCP channel).
-- rmcp handles requests concurrently: tests that pipe several calls at once get out-of-order results; space them out. Values redacted by default; credentials never logged.
-- Priority order: text + meta protocol first, binary/SASL later. Generic memcached before mcrouter.
-- Platforms: Linux and macOS first, Windows later. No Unix-only code outside `cfg` gates.
+- Protocol crate stays I/O-free; policy (timeouts, allowlist, write gating) lives in `mcp-server`.
+- Capability detection by probing (`mn`), never by version number. 1.5.22 answers `mg` partially but rejects `mn`: treated as no meta.
+- Read-only by default: write tools (`set_key`/`delete_key`/`touch_key`) are only registered with `MEMCACHED_MCP_ALLOW_WRITE=1`; `MEMCACHED_MCP_WRITE_PREFIX` limits keys. No flush tool. Values never returned or logged; audit logs writes + denied targets only.
+- Every connection goes through `MemcachedServer::connect` (allowlist). `MEMCACHED_MCP_DEST_MAP` and `MEMCACHED_MCP_METRICS_TARGETS` must not bypass it.
+- HTTP: bearer token mandatory (>=24 chars), non-loopback bind refused without `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`, no TLS in-process.
+- rmcp processes requests concurrently: tests piping several calls at once see out-of-order replies; space them out.
+- Don't claim behaviour that was not observed: mcrouter claims come from measurements on 34.0.0 (see `COMPATIBILITY.md`).
+- Platforms: Linux and macOS first, Windows built and smoke-tested too. No Unix-only code outside `cfg` gates.
+
+## Known gaps
+- No automated end-to-end test of the MCP binary (compare_destinations, HTTP auth, /metrics were verified by hand only).
+- No per-user auth/RBAC; no key inventory (`lru_crawler metadump`); mcrouter not in `/metrics`.
 
 See `mem:tech_stack`, `mem:suggested_commands`, `mem:conventions`, `mem:task_completion`.
