@@ -1,6 +1,7 @@
 //! MCP server for memcached. Read-only unless MEMCACHED_MCP_ALLOW_WRITE=1. Targets must be listed in MEMCACHED_MCP_ALLOWLIST.
 
 mod audit;
+mod auth;
 mod http;
 
 use std::collections::{BTreeMap, HashSet};
@@ -8,10 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use audit::Audit;
+use auth::{Identity, Perm};
 use memcached_core::Client;
 use memcached_protocol::text::StoreCmd;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{tool, tool_handler, tool_router, transport::stdio, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -27,6 +30,8 @@ struct MemcachedServer {
     audit: Arc<Audit>,
     write_prefixes: Vec<String>,
     allow_key_names: bool,
+    /// Set when serving HTTP: a request without an identity then gets no permissions.
+    http_mode: bool,
     /// mcrouter's own destination names -> addresses this server can reach.
     dest_map: Arc<BTreeMap<String, String>>,
     router: ToolRouter<Self>,
@@ -107,15 +112,39 @@ impl MemcachedServer {
             audit: Arc::new(Audit::from_env()?),
             write_prefixes,
             allow_key_names: std::env::var("MEMCACHED_MCP_ALLOW_KEY_NAMES").as_deref() == Ok("1"),
+            http_mode: false,
             dest_map: Arc::new(dest_map),
             router,
         })
     }
 
-    async fn connect(&self, addr: &str) -> Result<Client, String> {
+    /// The caller of this request. Over stdio that is the process owner, who may do anything the
+    /// server-wide switches allow. Over HTTP it is whoever the bearer token identified, and a
+    /// request that somehow carries no identity gets none (fail closed).
+    fn who(&self, ctx: &RequestContext<RoleServer>) -> Identity {
+        match ctx.extensions.get::<axum::http::request::Parts>() {
+            Some(parts) => parts
+                .extensions
+                .get::<Identity>()
+                .cloned()
+                .unwrap_or_else(Identity::none),
+            None if self.http_mode => Identity::none(),
+            None => Identity::all("stdio"),
+        }
+    }
+
+    /// Per-user permission check; refusals are audited because they are security events.
+    fn authorize(&self, who: &Identity, perm: Perm, tool: &str, addr: &str) -> Result<(), String> {
+        who.require(perm).inspect_err(|_| {
+            self.audit
+                .record(&who.name, tool, addr, None, "denied: missing permission");
+        })
+    }
+
+    async fn connect(&self, who: &Identity, addr: &str) -> Result<Client, String> {
         if !self.allowlist.contains(addr) {
             self.audit
-                .record("connect", addr, None, "denied: not in allowlist");
+                .record(&who.name, "connect", addr, None, "denied: not in allowlist");
             return Err(format!("{addr} is not in MEMCACHED_MCP_ALLOWLIST"));
         }
         Client::connect(addr, OP_TIMEOUT)
@@ -130,8 +159,14 @@ impl MemcachedServer {
         description = "Connect to a memcached server and report its version and detected capabilities (meta commands).",
         annotations(read_only_hint = true)
     )]
-    async fn server_info(&self, Parameters(a): Parameters<Target>) -> Result<String, String> {
-        let mut c = self.connect(&a.addr).await?;
+    async fn server_info(
+        &self,
+        Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "server_info", &a.addr)?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let caps = c.probe().await.map_err(|e| e.to_string())?;
         Ok(format!(
             "version: {}\nmeta_commands: {}",
@@ -143,8 +178,14 @@ impl MemcachedServer {
         description = "Return memcached `stats` (optionally a group such as settings, items, slabs) as JSON.",
         annotations(read_only_hint = true)
     )]
-    async fn get_stats(&self, Parameters(a): Parameters<StatsArgs>) -> Result<String, String> {
-        let mut c = self.connect(&a.addr).await?;
+    async fn get_stats(
+        &self,
+        Parameters(a): Parameters<StatsArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "get_stats", &a.addr)?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let stats = c
             .stats(a.group.as_deref())
             .await
@@ -156,8 +197,14 @@ impl MemcachedServer {
         description = "Check whether a key exists and return its metadata; the value itself is never returned. On servers with meta commands (1.6+) this also reports remaining TTL, seconds since last access, whether it was fetched before, and CAS; older servers report only flags and size. Does not change the item's LRU position or fetched-before state, but the lookup still counts in the server's get_hits/get_misses totals.",
         annotations(read_only_hint = true)
     )]
-    async fn get_key_metadata(&self, Parameters(a): Parameters<KeyArgs>) -> Result<String, String> {
-        let mut c = self.connect(&a.addr).await?;
+    async fn get_key_metadata(
+        &self,
+        Parameters(a): Parameters<KeyArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "get_key_metadata", &a.addr)?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let caps = c.probe().await.map_err(|e| e.to_string())?;
         let key = a.key.as_bytes();
         let body = if caps.meta {
@@ -180,8 +227,14 @@ impl MemcachedServer {
         description = "Analyze one node: hit ratio, evictions vs memory, connection limits, eviction skew across slab classes. Returns findings ranked by severity.",
         annotations(read_only_hint = true)
     )]
-    async fn diagnose_node(&self, Parameters(a): Parameters<Target>) -> Result<String, String> {
-        let mut c = self.connect(&a.addr).await?;
+    async fn diagnose_node(
+        &self,
+        Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "diagnose_node", &a.addr)?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let stats = c.stats(None).await.map_err(|e| e.to_string())?;
         // Older servers may lack these groups; the rules that need them are skipped.
         let items = c.stats(Some("items")).await.unwrap_or_default();
@@ -197,11 +250,14 @@ impl MemcachedServer {
     async fn compare_nodes(
         &self,
         Parameters(a): Parameters<CompareArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "compare_nodes", &a.addrs.join(","))?;
         let mut collected = Vec::new();
         let mut unreachable = Vec::new();
         for addr in &a.addrs {
-            let res = match self.connect(addr).await {
+            let res = match self.connect(&who, addr).await {
                 Ok(mut c) => c.stats(None).await.map_err(|e| e.to_string()),
                 Err(e) => Err(e),
             };
@@ -229,8 +285,11 @@ impl MemcachedServer {
     async fn mcrouter_get_stats(
         &self,
         Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<String, String> {
-        let mut c = self.connect(&a.addr).await?;
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "mcrouter_get_stats", &a.addr)?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let stats = c.stats(None).await.map_err(|e| e.to_string())?;
         let findings = mcrouter::analyze_stats(&stats);
         serde_json::to_string_pretty(&serde_json::json!({ "findings": findings, "stats": stats }))
@@ -244,8 +303,11 @@ impl MemcachedServer {
     async fn mcrouter_inspect_config(
         &self,
         Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<String, String> {
-        let mut c = self.connect(&a.addr).await?;
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "mcrouter_inspect_config", &a.addr)?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let (_, raw) = c
             .get(mcrouter::CONFIG_KEY.as_bytes())
             .await
@@ -265,8 +327,11 @@ impl MemcachedServer {
     async fn mcrouter_compare_destinations(
         &self,
         Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<String, String> {
-        let mut router = self.connect(&a.addr).await?;
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "mcrouter_compare_destinations", &a.addr)?;
+        let mut router = self.connect(&who, &a.addr).await?;
         let (_, raw) = router
             .get(mcrouter::CONFIG_KEY.as_bytes())
             .await
@@ -283,7 +348,7 @@ impl MemcachedServer {
                 continue;
             };
             let res = async {
-                let mut c = self.connect(real).await?;
+                let mut c = self.connect(&who, real).await?;
                 let stats = c.stats(None).await.map_err(|e| e.to_string())?;
                 let items = c.stats(Some("items")).await.unwrap_or_default();
                 let settings = c.stats(Some("settings")).await.unwrap_or_default();
@@ -325,8 +390,11 @@ impl MemcachedServer {
     async fn mcrouter_diagnose_failover(
         &self,
         Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<String, String> {
-        let mut c = self.connect(&a.addr).await?;
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "mcrouter_diagnose_failover", &a.addr)?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let (_, raw) = c
             .get(mcrouter::CONFIG_KEY.as_bytes())
             .await
@@ -349,12 +417,15 @@ impl MemcachedServer {
     async fn mcrouter_trace_key_route(
         &self,
         Parameters(a): Parameters<TraceArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "mcrouter_trace_key_route", &a.addr)?;
         let op = a.op.as_deref().unwrap_or("get");
         if !matches!(op, "get" | "set" | "delete") {
             return Err(format!("op must be get, set or delete, got '{op}'"));
         }
-        let mut c = self.connect(&a.addr).await?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let probe = mcrouter::route_key(op, &a.key);
         match c.get(probe.as_bytes()).await.map_err(|e| e.to_string())? {
             Some((_, dest)) => Ok(match mcrouter::interpret_route(&dest) {
@@ -415,10 +486,19 @@ impl MemcachedServer {
         description = "Sample what is stored in a memcached by walking its LRU crawler metadata dump (values are never read). Returns items, bytes and never-fetched counts per key prefix, plus individual keys only if enabled. Imposes crawler load, scans in the crawler's order rather than randomly (a partial scan is biased), and needs the LRU crawler enabled (off by default on 1.4).",
         annotations(read_only_hint = true)
     )]
-    async fn sample_keys(&self, Parameters(a): Parameters<SampleArgs>) -> Result<String, String> {
+    async fn sample_keys(
+        &self,
+        Parameters(a): Parameters<SampleArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Sample, "sample_keys", &a.addr)?;
         let want_keys = a.include_keys.unwrap_or(false);
         if want_keys && !self.allow_key_names {
             return Err("returning key names is disabled; set MEMCACHED_MCP_ALLOW_KEY_NAMES=1 on the server, or omit include_keys to get prefix totals only".to_owned());
+        }
+        if want_keys {
+            self.authorize(&who, Perm::KeyNames, "sample_keys", &a.addr)?;
         }
         let mut delim = a.delimiter.as_deref().unwrap_or(":").chars();
         let (Some(delim), None) = (delim.next(), delim.next()) else {
@@ -427,7 +507,7 @@ impl MemcachedServer {
         let scan = a.max_scan.unwrap_or(DEFAULT_SCAN).clamp(1, MAX_SCAN);
         let max_keys = a.max_keys.unwrap_or(50).min(500);
 
-        let c = self.connect(&a.addr).await?;
+        let c = self.connect(&who, &a.addr).await?;
         let sample = c.dump_keys(scan).await.map_err(|e| {
             let msg = e.to_string();
             if msg.contains("disabled") {
@@ -439,6 +519,7 @@ impl MemcachedServer {
             }
         })?;
         self.audit.record(
+            &who.name,
             "sample_keys",
             &a.addr,
             None,
@@ -505,8 +586,14 @@ impl MemcachedServer {
         description = "WRITES to the cache: store a value under a key, replacing any existing value.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
-    async fn set_key(&self, Parameters(a): Parameters<SetArgs>) -> Result<String, String> {
-        self.check_write_key(&a.addr, &a.key, "set_key")?;
+    async fn set_key(
+        &self,
+        Parameters(a): Parameters<SetArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Write, "set_key", &a.addr)?;
+        self.check_write_key(&who, &a.addr, &a.key, "set_key")?;
         let ttl = a.ttl_seconds.unwrap_or(0);
         if ttl < 0 {
             return Err("ttl_seconds must not be negative".to_owned());
@@ -517,7 +604,7 @@ impl MemcachedServer {
                 a.value.len()
             ));
         }
-        let mut c = self.connect(&a.addr).await?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let res = c
             .store(
                 StoreCmd::Set,
@@ -529,7 +616,7 @@ impl MemcachedServer {
             .await
             .map(|s| format!("{s:?}"))
             .map_err(|e| e.to_string());
-        self.audit_result("set_key", &a.addr, &a.key, &res);
+        self.audit_result(&who, "set_key", &a.addr, &a.key, &res);
         res
     }
 
@@ -537,15 +624,21 @@ impl MemcachedServer {
         description = "WRITES to the cache: delete a key.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
-    async fn delete_key(&self, Parameters(a): Parameters<KeyArgs>) -> Result<String, String> {
-        self.check_write_key(&a.addr, &a.key, "delete_key")?;
-        let mut c = self.connect(&a.addr).await?;
+    async fn delete_key(
+        &self,
+        Parameters(a): Parameters<KeyArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Write, "delete_key", &a.addr)?;
+        self.check_write_key(&who, &a.addr, &a.key, "delete_key")?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let res = c
             .delete(a.key.as_bytes())
             .await
             .map(|s| format!("{s:?}"))
             .map_err(|e| e.to_string());
-        self.audit_result("delete_key", &a.addr, &a.key, &res);
+        self.audit_result(&who, "delete_key", &a.addr, &a.key, &res);
         res
     }
 
@@ -553,30 +646,43 @@ impl MemcachedServer {
         description = "WRITES to the cache: change a key's time to live without touching its value.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
-    async fn touch_key(&self, Parameters(a): Parameters<TouchArgs>) -> Result<String, String> {
-        self.check_write_key(&a.addr, &a.key, "touch_key")?;
+    async fn touch_key(
+        &self,
+        Parameters(a): Parameters<TouchArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Write, "touch_key", &a.addr)?;
+        self.check_write_key(&who, &a.addr, &a.key, "touch_key")?;
         if a.ttl_seconds < 0 {
             return Err("ttl_seconds must not be negative".to_owned());
         }
-        let mut c = self.connect(&a.addr).await?;
+        let mut c = self.connect(&who, &a.addr).await?;
         let res = c
             .touch(a.key.as_bytes(), a.ttl_seconds)
             .await
             .map(|s| format!("{s:?}"))
             .map_err(|e| e.to_string());
-        self.audit_result("touch_key", &a.addr, &a.key, &res);
+        self.audit_result(&who, "touch_key", &a.addr, &a.key, &res);
         res
     }
 }
 
 impl MemcachedServer {
     /// With `MEMCACHED_MCP_WRITE_PREFIX` set, writes are limited to keys with one of these prefixes.
-    fn check_write_key(&self, addr: &str, key: &str, tool: &str) -> Result<(), String> {
+    fn check_write_key(
+        &self,
+        who: &Identity,
+        addr: &str,
+        key: &str,
+        tool: &str,
+    ) -> Result<(), String> {
         if self.write_prefixes.is_empty() || self.write_prefixes.iter().any(|p| key.starts_with(p))
         {
             return Ok(());
         }
         self.audit.record(
+            &who.name,
             tool,
             addr,
             Some(key),
@@ -588,12 +694,20 @@ impl MemcachedServer {
         ))
     }
 
-    fn audit_result(&self, tool: &str, addr: &str, key: &str, res: &Result<String, String>) {
+    fn audit_result(
+        &self,
+        who: &Identity,
+        tool: &str,
+        addr: &str,
+        key: &str,
+        res: &Result<String, String>,
+    ) {
         let outcome = match res {
             Ok(s) => format!("ok: {s}"),
             Err(e) => format!("error: {e}"),
         };
-        self.audit.record(tool, addr, Some(key), &outcome);
+        self.audit
+            .record(&who.name, tool, addr, Some(key), &outcome);
     }
 }
 
@@ -602,7 +716,10 @@ impl rmcp::ServerHandler for MemcachedServer {}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server = MemcachedServer::from_env()?;
+    if std::env::args().nth(1).as_deref() == Some("new-token") {
+        return new_token_command().map_err(Into::into);
+    }
+    let mut server = MemcachedServer::from_env()?;
     if server.allowlist.is_empty() {
         eprintln!("warning: MEMCACHED_MCP_ALLOWLIST is empty; every target will be rejected");
     }
@@ -613,6 +730,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(bind) => {
             let cfg = http_config(bind, &server.allowlist)?;
             let audit = server.audit.clone();
+            server.http_mode = true;
             http::serve(server, audit, cfg).await?;
         }
         None => {
@@ -642,19 +760,80 @@ fn http_bind_from_args() -> Result<Option<std::net::SocketAddr>, String> {
     }
 }
 
+/// Either one shared token (full access) or a file of per-user hashed tokens, never both.
+fn token_store() -> Result<auth::TokenStore, String> {
+    let shared = std::env::var("MEMCACHED_MCP_HTTP_TOKEN").unwrap_or_default();
+    let file = std::env::var("MEMCACHED_MCP_HTTP_TOKEN_FILE").unwrap_or_default();
+    match (shared.is_empty(), file.is_empty()) {
+        (false, false) => Err(
+            "set either MEMCACHED_MCP_HTTP_TOKEN or MEMCACHED_MCP_HTTP_TOKEN_FILE, not both"
+                .to_owned(),
+        ),
+        (true, true) => Err(format!(
+            "set MEMCACHED_MCP_HTTP_TOKEN to a secret of at least {} characters, or MEMCACHED_MCP_HTTP_TOKEN_FILE to a per-user token file (see `memcached-mcp new-token`)",
+            http::MIN_TOKEN_LEN
+        )),
+        (false, true) => {
+            if shared.len() < http::MIN_TOKEN_LEN {
+                return Err(format!(
+                    "MEMCACHED_MCP_HTTP_TOKEN must be at least {} characters",
+                    http::MIN_TOKEN_LEN
+                ));
+            }
+            eprintln!("auth: one shared token (full access, no per-user identity)");
+            Ok(auth::TokenStore::shared(&shared))
+        }
+        (true, false) => {
+            let json = std::fs::read_to_string(&file)
+                .map_err(|e| format!("cannot read MEMCACHED_MCP_HTTP_TOKEN_FILE '{file}': {e}"))?;
+            let store = auth::TokenStore::from_json(&json)?;
+            eprintln!("auth: {} user(s) loaded from {file}", store.len());
+            Ok(store)
+        }
+    }
+}
+
+/// `memcached-mcp new-token NAME perm[,perm...]`: prints a fresh token once, plus the entry to
+/// add to the token file. Only the hash is meant to be stored.
+fn new_token_command() -> Result<(), String> {
+    let mut args = std::env::args().skip(2);
+    let usage = "usage: memcached-mcp new-token NAME PERMS   (PERMS: comma-separated from read,sample,key_names,write,metrics)";
+    let name = args.next().ok_or(usage)?;
+    let perms = args.next().ok_or(usage)?;
+    let perms: Vec<&str> = perms
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let entry = serde_json::json!({
+        "name": name,
+        "token_sha256": "0".repeat(64),
+        "permissions": perms,
+    });
+    // Reuse the file validator so a typo is caught here, not at server start.
+    auth::TokenStore::from_json(&format!("{{\"users\":[{entry}]}}"))?;
+    let token = auth::new_token().map_err(|e| format!("no randomness available: {e}"))?;
+    let entry = serde_json::json!({
+        "name": name,
+        "token_sha256": auth::sha256_hex(&token),
+        "permissions": perms,
+    });
+    println!("token (shown once, give it to {name}): {token}");
+    println!("add to the token file's \"users\" list:");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&entry).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 /// Authentication is mandatory over HTTP, and plaintext is only allowed on loopback unless
 /// explicitly opted into (the bearer token would otherwise cross the network in the clear).
 fn http_config(
     bind: std::net::SocketAddr,
     allowlist: &HashSet<String>,
 ) -> Result<http::HttpConfig, String> {
-    let token = std::env::var("MEMCACHED_MCP_HTTP_TOKEN").unwrap_or_default();
-    if token.len() < http::MIN_TOKEN_LEN {
-        return Err(format!(
-            "set MEMCACHED_MCP_HTTP_TOKEN to a secret of at least {} characters",
-            http::MIN_TOKEN_LEN
-        ));
-    }
+    let tokens = token_store()?;
     if !bind.ip().is_loopback()
         && std::env::var("MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT").as_deref() != Ok("1")
     {
@@ -684,7 +863,7 @@ fn http_config(
     }
     Ok(http::HttpConfig {
         bind,
-        token,
+        tokens,
         allowed_hosts,
         metrics_targets,
     })

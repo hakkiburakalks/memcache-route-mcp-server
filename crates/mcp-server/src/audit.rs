@@ -23,13 +23,15 @@ impl Audit {
         Ok(Self { file })
     }
 
-    pub fn record(&self, tool: &str, addr: &str, key: Option<&str>, outcome: &str) {
+    /// `user` is the authenticated identity: a token-file name, `shared-token`, `stdio`, or `-`
+    /// when the caller could not be identified.
+    pub fn record(&self, user: &str, tool: &str, addr: &str, key: Option<&str>, outcome: &str) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let mut line = serde_json::json!({
-            "ts": ts, "tool": tool, "addr": addr, "key": key, "outcome": outcome,
+            "ts": ts, "user": user, "tool": tool, "addr": addr, "key": key, "outcome": outcome,
         })
         .to_string();
         line.push('\n');

@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Extension;
 use axum::Router;
 use memcached_core::Client;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -19,13 +20,14 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::ServerHandler;
 
 use crate::audit::Audit;
+use crate::auth::{Identity, Perm, TokenStore};
 
 /// Shorter tokens are refused at startup.
 pub const MIN_TOKEN_LEN: usize = 24;
 
 pub struct HttpConfig {
     pub bind: SocketAddr,
-    pub token: String,
+    pub tokens: TokenStore,
     /// Extra `Host` values to accept besides loopback (for use behind a proxy).
     pub allowed_hosts: Vec<String>,
     /// memcached servers exposed on `/metrics`. Empty disables the endpoint.
@@ -44,7 +46,20 @@ async fn scrape(addr: &str) -> Option<diagnostics::Stats> {
 }
 
 /// Scrapes every target concurrently; an unreachable one is reported as `memcached_up 0`.
-async fn metrics(State(targets): State<Arc<Vec<String>>>) -> Response {
+async fn metrics(
+    State(targets): State<Arc<Vec<String>>>,
+    Extension(who): Extension<Identity>,
+) -> Response {
+    if let Err(e) = who.require(Perm::Metrics) {
+        return (
+            StatusCode::FORBIDDEN,
+            format!(
+                "{e}
+"
+            ),
+        )
+            .into_response();
+    }
     let mut set = tokio::task::JoinSet::new();
     for (i, addr) in targets.iter().cloned().enumerate() {
         set.spawn(async move {
@@ -68,19 +83,9 @@ async fn metrics(State(targets): State<Arc<Vec<String>>>) -> Response {
         .into_response()
 }
 
-/// Compares without stopping at the first differing byte.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = a.len() ^ b.len();
-    for i in 0..a.len().max(b.len()) {
-        diff |= usize::from(a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0));
-    }
-    diff == 0
-}
-
-fn bearer_matches(header: Option<&str>, token: &str) -> bool {
-    header
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes()))
+/// The token from an `Authorization: Bearer <token>` header.
+fn bearer_token(header: Option<&str>) -> Option<&str> {
+    header.and_then(|h| h.strip_prefix("Bearer "))
 }
 
 /// The hostname in a `Host` header, without port or IPv6 brackets.
@@ -122,24 +127,26 @@ async fn require_known_host(
 
 #[derive(Clone)]
 struct Auth {
-    token: Arc<String>,
+    tokens: Arc<TokenStore>,
     audit: Arc<Audit>,
 }
 
 async fn require_token(
     State(auth): State<Auth>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     let header = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    if bearer_matches(header, &auth.token) {
+    if let Some(identity) = bearer_token(header).and_then(|t| auth.tokens.lookup(t)) {
+        req.extensions_mut().insert(identity);
         return next.run(req).await;
     }
     auth.audit.record(
+        "-",
         "http",
         &peer.to_string(),
         None,
@@ -166,7 +173,7 @@ where
         StreamableHttpServerConfig::default().with_allowed_hosts(hosts),
     );
     let auth = Auth {
-        token: Arc::new(cfg.token),
+        tokens: Arc::new(cfg.tokens),
         audit,
     };
     let mut app = Router::new().nest_service("/mcp", mcp);
@@ -196,15 +203,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn constant_time_eq_matches_normal_equality() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-        assert!(!constant_time_eq(b"", b"a"));
-        assert!(constant_time_eq(b"", b""));
-    }
 
     #[test]
     fn host_header_matching() {
@@ -237,10 +235,9 @@ mod tests {
 
     #[test]
     fn bearer_header_parsing() {
-        assert!(bearer_matches(Some("Bearer s3cret"), "s3cret"));
-        assert!(!bearer_matches(Some("Bearer wrong"), "s3cret"));
-        assert!(!bearer_matches(Some("Basic s3cret"), "s3cret"));
-        assert!(!bearer_matches(Some("s3cret"), "s3cret"));
-        assert!(!bearer_matches(None, "s3cret"));
+        assert_eq!(bearer_token(Some("Bearer s3cret")), Some("s3cret"));
+        assert_eq!(bearer_token(Some("Basic s3cret")), None);
+        assert_eq!(bearer_token(Some("s3cret")), None);
+        assert_eq!(bearer_token(None), None);
     }
 }

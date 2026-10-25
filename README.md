@@ -8,7 +8,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 
 - **Read-only by default.** Write tools (`set_key`, `delete_key`, `touch_key`) are not even listed unless `MEMCACHED_MCP_ALLOW_WRITE=1`. There is no flush tool.
 - **Write prefixes.** With `MEMCACHED_MCP_WRITE_PREFIX` (comma-separated, e.g. `tmp:,scratch:`) writes are limited to keys starting with one of the prefixes; others are refused before any connection is made. Without it, any key on an allowlisted server can be written and the server warns at startup.
-- **Audit trail.** Writes and rejected targets are logged as JSON lines to `MEMCACHED_MCP_AUDIT_LOG` (or stderr). Key names and outcomes are recorded, never values. Reads are not audited.
+- **Audit trail.** Writes, rejected targets and denied requests are logged as JSON lines (with the calling user in HTTP mode) to `MEMCACHED_MCP_AUDIT_LOG` (or stderr). Key names and outcomes are recorded, never values or tokens. Reads are not audited.
 - **Authenticated over HTTP.** The HTTP transport requires a bearer token (see below); stdio relies on whoever can start the process.
 - **Allowlist.** The server only connects to `host:port` pairs listed in `MEMCACHED_MCP_ALLOWLIST` (comma-separated). With an empty list every target is rejected.
 - **Key sampling is opt-in and private by default.** `sample_keys` exists only with `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1` and then returns prefix totals, not key names. Individual key names additionally need `MEMCACHED_MCP_ALLOW_KEY_NAMES=1`. The audit log records that a sample ran, never which keys it saw.
@@ -49,7 +49,31 @@ The endpoint is `/mcp`. Clients must send `Authorization: Bearer <token>`; reque
 - The token is mandatory; the server refuses to start without one of at least 24 characters.
 - There is no TLS. Binding to anything other than loopback is refused unless `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`, because the token would cross the network in clear text. Put a TLS-terminating proxy in front and bind to loopback.
 - `Host` headers are checked against loopback names on every route (including `/metrics`) to block DNS rebinding. Behind a proxy, list the public hostnames in `MEMCACHED_MCP_HTTP_ALLOWED_HOSTS` (comma-separated).
-- One shared token means one identity: the audit log does not say which user did what. Per-user auth and RBAC are not implemented.
+- A single shared token means one identity with full access. For per-user access see below.
+
+### Per-user tokens and permissions
+
+Instead of `MEMCACHED_MCP_HTTP_TOKEN`, point `MEMCACHED_MCP_HTTP_TOKEN_FILE` at a JSON file of users (set one of the two, not both). Only SHA-256 hashes of the tokens are stored. Issue a token with:
+
+```
+memcached-mcp new-token alice read,metrics
+```
+
+It prints the token once (give it to Alice) and the entry to add to the file:
+
+```json
+{"users": [{"name": "alice", "token_sha256": "...", "permissions": ["read", "metrics"]}]}
+```
+
+| Permission | Allows |
+| --- | --- |
+| `read` | every read-only tool, including the mcrouter ones, except `sample_keys` |
+| `sample` | `sample_keys` (prefix totals) |
+| `key_names` | key names from `sample_keys` (also needs `sample`) |
+| `write` | `set_key`, `delete_key`, `touch_key` |
+| `metrics` | `/metrics` |
+
+A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is read at startup; restart to change users. Tokens are 256 random bits, so a fast hash is enough. There is no token expiry or rotation tooling.
 
 ### Prometheus metrics
 

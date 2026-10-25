@@ -28,6 +28,7 @@ fn command(envs: &[(&str, &str)], args: &[&str]) -> Command {
         .env_remove("MEMCACHED_MCP_WRITE_PREFIX")
         .env_remove("MEMCACHED_MCP_AUDIT_LOG")
         .env_remove("MEMCACHED_MCP_HTTP_TOKEN")
+        .env_remove("MEMCACHED_MCP_HTTP_TOKEN_FILE")
         .env_remove("MEMCACHED_MCP_METRICS_TARGETS")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
@@ -606,4 +607,279 @@ async fn key_sampling_is_opt_in_and_private_by_default() {
             "sample_keys audit lines must not carry key names: {line}"
         );
     }
+}
+
+/// POSTs JSON to /mcp. Returns (status, lowercased response headers, body).
+async fn http_post(
+    port: u16,
+    token: &str,
+    session: Option<&str>,
+    body: &Value,
+) -> (u16, String, String) {
+    let body = body.to_string();
+    let mut req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if let Some(sid) = session {
+        req.push_str(&format!("Mcp-Session-Id: {sid}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(&body);
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut raw = String::new();
+    tokio::time::timeout(Duration::from_secs(10), s.read_to_string(&mut raw))
+        .await
+        .expect("timed out reading the HTTP reply")
+        .unwrap();
+    let status = raw.split(' ').nth(1).unwrap().parse().unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+    (status, head.to_ascii_lowercase(), body.to_owned())
+}
+
+/// The JSON-RPC reply with this id, from either a plain JSON body or an SSE stream.
+fn rpc_reply(body: &str, id: u64) -> Value {
+    body.lines()
+        .map(|l| l.trim().strip_prefix("data:").unwrap_or(l.trim()).trim())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["id"] == json!(id))
+        .unwrap_or_else(|| panic!("no reply with id {id} in: {body}"))
+}
+
+/// One MCP session over HTTP, authenticated as a single token.
+struct HttpMcp {
+    port: u16,
+    token: String,
+    session: String,
+    next_id: u64,
+}
+
+impl HttpMcp {
+    async fn start(port: u16, token: &str) -> Self {
+        let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}});
+        let (status, head, body) = http_post(port, token, None, &init).await;
+        assert_eq!(status, 200, "{body}");
+        let session = head
+            .lines()
+            .find_map(|l| l.strip_prefix("mcp-session-id:"))
+            .expect("no session id")
+            .trim()
+            .to_owned();
+        let note = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+        let (status, _, _) = http_post(port, token, Some(&session), &note).await;
+        assert_eq!(status, 202);
+        Self {
+            port,
+            token: token.to_owned(),
+            session,
+            next_id: 2,
+        }
+    }
+
+    /// Returns (is_error, text).
+    async fn call(&mut self, tool: &str, args: Value) -> (bool, String) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let req = json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":args}});
+        let (status, _, body) = http_post(self.port, &self.token, Some(&self.session), &req).await;
+        assert_eq!(status, 200, "{body}");
+        let v = rpc_reply(&body, id);
+        if let Some(err) = v.get("error") {
+            return (true, err["message"].as_str().unwrap_or_default().to_owned());
+        }
+        let r = &v["result"];
+        (
+            r["isError"] == json!(true),
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    }
+}
+
+/// Reads the server's stderr until it reports the HTTP port.
+async fn listening_port(child: &mut Child) -> u16 {
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut line = String::new();
+            assert!(
+                err.read_line(&mut line).await.unwrap() > 0,
+                "server exited before listening"
+            );
+            if let Some(rest) = line.trim().strip_prefix("listening on http://127.0.0.1:") {
+                return rest.split('/').next().unwrap().parse::<u16>().unwrap();
+            }
+        }
+    })
+    .await
+    .expect("server never reported its port")
+}
+
+#[tokio::test]
+async fn http_users_get_only_their_permissions() {
+    let Some(addr) = memcached_addr() else { return };
+    let dir = std::env::temp_dir().join(format!("memcached-mcp-rbac-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (tokens, audit) = (dir.join("tokens.json"), dir.join("audit.log"));
+    let _ = std::fs::remove_file(&audit);
+
+    // Tokens come from the real `new-token` subcommand, so it is tested too.
+    let mut entries = Vec::new();
+    let mut issued = std::collections::HashMap::new();
+    for (name, perms) in [
+        ("reader", "read"),
+        ("writer", "read,write,metrics"),
+        ("sampler", "read,sample"),
+    ] {
+        let out = command(&[], &["new-token", name, perms])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        let token = text
+            .lines()
+            .next()
+            .unwrap()
+            .rsplit(": ")
+            .next()
+            .unwrap()
+            .to_owned();
+        let json = text.split_once('\n').unwrap().1;
+        let entry: Value = serde_json::from_str(&json[json.find('{').unwrap()..]).unwrap();
+        assert_eq!(entry["name"], json!(name));
+        assert!(!json.contains(&token), "the entry must hold only the hash");
+        entries.push(entry);
+        issued.insert(name, token);
+    }
+    std::fs::write(&tokens, json!({"users": entries}).to_string()).unwrap();
+
+    // A bad permission name is rejected when the token is issued.
+    let bad = command(&[], &["new-token", "x", "root"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!bad.status.success());
+
+    let mut child = command(
+        &[
+            ("MEMCACHED_MCP_ALLOWLIST", &addr),
+            ("MEMCACHED_MCP_HTTP_TOKEN_FILE", tokens.to_str().unwrap()),
+            ("MEMCACHED_MCP_METRICS_TARGETS", &addr),
+            ("MEMCACHED_MCP_ALLOW_WRITE", "1"),
+            ("MEMCACHED_MCP_WRITE_PREFIX", "rbac:"),
+            ("MEMCACHED_MCP_ALLOW_KEY_SAMPLING", "1"),
+            ("MEMCACHED_MCP_AUDIT_LOG", audit.to_str().unwrap()),
+        ],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+
+    // Unknown token: 401.
+    assert_eq!(http_post(port, "nobody", None, &json!({})).await.0, 401);
+
+    let mut reader = HttpMcp::start(port, &issued["reader"]).await;
+    let (err, text) = reader.call("get_stats", json!({"addr":addr})).await;
+    assert!(!err, "{text}");
+    for (tool, args) in [
+        ("set_key", json!({"addr":addr,"key":"rbac:k","value":"v"})),
+        ("sample_keys", json!({"addr":addr})),
+    ] {
+        let (err, text) = reader.call(tool, args).await;
+        assert!(
+            err && text.contains("forbidden") && text.contains("'reader'"),
+            "{tool}: {text}"
+        );
+    }
+
+    let mut writer = HttpMcp::start(port, &issued["writer"]).await;
+    let (err, text) = writer
+        .call(
+            "set_key",
+            json!({"addr":addr,"key":"rbac:k","value":SECRET,"ttl_seconds":30}),
+        )
+        .await;
+    assert!(!err && text == "Stored", "{text}");
+    let (err, text) = writer.call("sample_keys", json!({"addr":addr})).await;
+    assert!(err && text.contains("'writer'"), "{text}");
+
+    let mut sampler = HttpMcp::start(port, &issued["sampler"]).await;
+    let (err, text) = sampler.call("sample_keys", json!({"addr":addr})).await;
+    // Allowed to run; it may still fail on servers without the crawler, but never for permissions.
+    assert!(!text.contains("forbidden"), "err={err} {text}");
+
+    // /metrics needs the metrics permission.
+    for (user, want) in [("reader", 403), ("writer", 200)] {
+        let auth = format!("Bearer {}", issued[user]);
+        let (status, body) = http_get(port, "/metrics", &[("Authorization", &auth)]).await;
+        assert_eq!(status, want, "{user}: {body}");
+    }
+
+    // Clean up the key we wrote, then check who is on record.
+    let (err, _) = writer
+        .call("delete_key", json!({"addr":addr,"key":"rbac:k"}))
+        .await;
+    assert!(!err);
+    let log = std::fs::read_to_string(&audit).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        log.contains(r#""user":"writer""#) && log.contains(r#""tool":"set_key""#),
+        "{log}"
+    );
+    assert!(
+        log.contains(r#""user":"reader""#) && log.contains("denied: missing permission"),
+        "{log}"
+    );
+    assert!(!log.contains(SECRET));
+    for t in issued.values() {
+        assert!(!log.contains(t.as_str()), "tokens must never be logged");
+    }
+}
+
+#[tokio::test]
+async fn http_refuses_ambiguous_or_broken_auth_config() {
+    let dir = std::env::temp_dir().join(format!("memcached-mcp-authcfg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad_file = dir.join("bad.json");
+    std::fs::write(&bad_file, r#"{"users":[]}"#).unwrap();
+    let missing = dir.join("missing.json");
+    for (envs, needle) in [
+        (
+            vec![
+                ("MEMCACHED_MCP_HTTP_TOKEN", TOKEN),
+                ("MEMCACHED_MCP_HTTP_TOKEN_FILE", bad_file.to_str().unwrap()),
+            ],
+            "not both",
+        ),
+        (
+            vec![("MEMCACHED_MCP_HTTP_TOKEN_FILE", bad_file.to_str().unwrap())],
+            "no users",
+        ),
+        (
+            vec![("MEMCACHED_MCP_HTTP_TOKEN_FILE", missing.to_str().unwrap())],
+            "cannot read",
+        ),
+    ] {
+        let out = tokio::time::timeout(
+            Duration::from_secs(10),
+            command(&envs, &["--http", "127.0.0.1:0"]).output(),
+        )
+        .await
+        .expect("server should exit, not start")
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success());
+        assert!(stderr.contains(needle), "expected '{needle}' in: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
