@@ -24,6 +24,7 @@ const MAX_VALUE_BYTES: usize = 1024 * 1024;
 struct MemcachedServer {
     allowlist: HashSet<String>,
     audit: Arc<Audit>,
+    write_prefixes: Vec<String>,
     router: ToolRouter<Self>,
 }
 
@@ -75,6 +76,13 @@ impl MemcachedServer {
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .collect();
+        let write_prefixes = std::env::var("MEMCACHED_MCP_WRITE_PREFIX")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
         let mut router = Self::tool_router();
         if std::env::var("MEMCACHED_MCP_ALLOW_WRITE").as_deref() == Ok("1") {
             router.merge(Self::write_router());
@@ -82,6 +90,7 @@ impl MemcachedServer {
         Ok(Self {
             allowlist,
             audit: Arc::new(Audit::from_env()?),
+            write_prefixes,
             router,
         })
     }
@@ -284,6 +293,7 @@ impl MemcachedServer {
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn set_key(&self, Parameters(a): Parameters<SetArgs>) -> Result<String, String> {
+        self.check_write_key(&a.addr, &a.key, "set_key")?;
         let ttl = a.ttl_seconds.unwrap_or(0);
         if ttl < 0 {
             return Err("ttl_seconds must not be negative".to_owned());
@@ -315,6 +325,7 @@ impl MemcachedServer {
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn delete_key(&self, Parameters(a): Parameters<KeyArgs>) -> Result<String, String> {
+        self.check_write_key(&a.addr, &a.key, "delete_key")?;
         let mut c = self.connect(&a.addr).await?;
         let res = c
             .delete(a.key.as_bytes())
@@ -330,6 +341,7 @@ impl MemcachedServer {
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn touch_key(&self, Parameters(a): Parameters<TouchArgs>) -> Result<String, String> {
+        self.check_write_key(&a.addr, &a.key, "touch_key")?;
         if a.ttl_seconds < 0 {
             return Err("ttl_seconds must not be negative".to_owned());
         }
@@ -345,6 +357,24 @@ impl MemcachedServer {
 }
 
 impl MemcachedServer {
+    /// With `MEMCACHED_MCP_WRITE_PREFIX` set, writes are limited to keys with one of these prefixes.
+    fn check_write_key(&self, addr: &str, key: &str, tool: &str) -> Result<(), String> {
+        if self.write_prefixes.is_empty() || self.write_prefixes.iter().any(|p| key.starts_with(p))
+        {
+            return Ok(());
+        }
+        self.audit.record(
+            tool,
+            addr,
+            Some(key),
+            "denied: key outside MEMCACHED_MCP_WRITE_PREFIX",
+        );
+        Err(format!(
+            "key '{key}' is outside the allowed write prefixes ({})",
+            self.write_prefixes.join(", ")
+        ))
+    }
+
     fn audit_result(&self, tool: &str, addr: &str, key: &str, res: &Result<String, String>) {
         let outcome = match res {
             Ok(s) => format!("ok: {s}"),
@@ -362,6 +392,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = MemcachedServer::from_env()?;
     if server.allowlist.is_empty() {
         eprintln!("warning: MEMCACHED_MCP_ALLOWLIST is empty; every target will be rejected");
+    }
+    if server.router.has_route("set_key") && server.write_prefixes.is_empty() {
+        eprintln!("warning: writes are enabled with no MEMCACHED_MCP_WRITE_PREFIX; any key on an allowlisted server can be written");
     }
     let service = server.serve(stdio()).await?;
     service.waiting().await?;

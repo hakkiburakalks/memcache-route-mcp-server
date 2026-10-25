@@ -7,6 +7,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 ## Safety model
 
 - **Read-only by default.** Write tools (`set_key`, `delete_key`, `touch_key`) are not even listed unless `MEMCACHED_MCP_ALLOW_WRITE=1`. There is no flush tool.
+- **Write prefixes.** With `MEMCACHED_MCP_WRITE_PREFIX` (comma-separated, e.g. `tmp:,scratch:`) writes are limited to keys starting with one of the prefixes; others are refused before any connection is made. Without it, any key on an allowlisted server can be written and the server warns at startup.
 - **Audit trail.** Writes and rejected targets are logged as JSON lines to `MEMCACHED_MCP_AUDIT_LOG` (or stderr). Key names and outcomes are recorded, never values. Reads are not audited.
 - **Allowlist.** The server only connects to `host:port` pairs listed in `MEMCACHED_MCP_ALLOWLIST` (comma-separated). With an empty list every target is rejected.
 - **No values.** `get_key_metadata` returns existence, flags and size, never the value.
