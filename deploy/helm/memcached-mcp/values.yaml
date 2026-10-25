@@ -1,0 +1,48 @@
+# The image is not published anywhere yet: build it from the Dockerfile and push it to your own
+# registry, then set repository and tag.
+image:
+  repository: memcached-mcp
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+# host:port pairs the server may connect to. Required: with none, every target is rejected.
+# e.g. ["memcached-0.memcached:11211", "mcrouter:5000"]
+allowlist: []
+
+auth:
+  # Name of an existing Secret. Required.
+  existingSecret: ""
+  # "file":  key `tokens.json` holds per-user hashed tokens (see `memcached-mcp new-token`).
+  # "token": key `token` holds one shared secret (>= 24 chars) that grants full access.
+  mode: file
+  tokenKey: token
+  fileKey: tokens.json
+
+# Extra Host header names accepted besides loopback (the public name of the ingress).
+allowedHosts: []
+
+# Servers exposed on /metrics (each must also be in allowlist).
+metrics:
+  memcachedTargets: []
+  mcrouterTargets: []
+
+# Write tools. Off by default; prefixes limits which keys may be written.
+write:
+  enabled: false
+  prefixes: []
+
+keySampling:
+  enabled: false
+  allowKeyNames: false
+
+# mcrouter destination names -> reachable addresses, as "name=addr" entries.
+destMap: []
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,125 @@
+{{- if not .Values.allowlist }}{{ fail "allowlist must list at least one host:port" }}{{ end }}
+{{- if not .Values.auth.existingSecret }}{{ fail "auth.existingSecret is required: the server will not start without credentials" }}{{ end }}
+{{- if not (has .Values.auth.mode (list "token" "file")) }}{{ fail "auth.mode must be token or file" }}{{ end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "memcached-mcp.fullname" . }}
+  labels:
+    {{- include "memcached-mcp.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "memcached-mcp.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: memcached-mcp
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--http", "0.0.0.0:8080"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # The pod network is plaintext: terminate TLS at an ingress or service mesh.
+            - name: MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT
+              value: "1"
+            - name: MEMCACHED_MCP_ALLOWLIST
+              value: {{ join "," .Values.allowlist | quote }}
+            {{- if eq .Values.auth.mode "token" }}
+            - name: MEMCACHED_MCP_HTTP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.tokenKey }}
+            {{- else }}
+            - name: MEMCACHED_MCP_HTTP_TOKEN_FILE
+              value: /etc/memcached-mcp/{{ .Values.auth.fileKey }}
+            {{- end }}
+            {{- with .Values.allowedHosts }}
+            - name: MEMCACHED_MCP_HTTP_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.metrics.memcachedTargets }}
+            - name: MEMCACHED_MCP_METRICS_TARGETS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.metrics.mcrouterTargets }}
+            - name: MEMCACHED_MCP_MCROUTER_METRICS_TARGETS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.destMap }}
+            - name: MEMCACHED_MCP_DEST_MAP
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.write.enabled }}
+            - name: MEMCACHED_MCP_ALLOW_WRITE
+              value: "1"
+            {{- with .Values.write.prefixes }}
+            - name: MEMCACHED_MCP_WRITE_PREFIX
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.keySampling.enabled }}
+            - name: MEMCACHED_MCP_ALLOW_KEY_SAMPLING
+              value: "1"
+            {{- if .Values.keySampling.allowKeyNames }}
+            - name: MEMCACHED_MCP_ALLOW_KEY_NAMES
+              value: "1"
+            {{- end }}
+            {{- end }}
+          # A plain HTTP probe would get 401, so check that the port accepts connections.
+          readinessProbe:
+            tcpSocket: { port: http }
+          livenessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if eq .Values.auth.mode "file" }}
+          volumeMounts:
+            - name: auth
+              mountPath: /etc/memcached-mcp
+              readOnly: true
+          {{- end }}
+      {{- if eq .Values.auth.mode "file" }}
+      volumes:
+        - name: auth
+          secret:
+            secretName: {{ .Values.auth.existingSecret }}
+            items:
+              - key: {{ .Values.auth.fileKey }}
+                path: {{ .Values.auth.fileKey }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

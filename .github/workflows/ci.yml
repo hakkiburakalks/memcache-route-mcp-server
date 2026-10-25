@@ -93,3 +93,14 @@ jobs:
           test "$(docker image inspect memcached-mcp:ci --format '{{.Config.User}}')" = "65532:65532"
           # The server must start and reject a bad argument with its own message.
           docker run --rm memcached-mcp:ci --bogus 2>&1 | grep -q "unknown argument"
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: helm lint deploy/helm/memcached-mcp --set 'allowlist={a:11211}' --set auth.existingSecret=s
+      - name: Refuses to render without allowlist or credentials
+        run: |
+          ! helm template t deploy/helm/memcached-mcp
+          ! helm template t deploy/helm/memcached-mcp --set 'allowlist={a:11211}'
+      - run: helm template t deploy/helm/memcached-mcp --set 'allowlist={a:11211}' --set auth.existingSecret=s --set auth.mode=token > /dev/null
