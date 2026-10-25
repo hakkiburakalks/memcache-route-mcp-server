@@ -31,4 +31,6 @@ With a plain `PoolRoute`, once a destination is marked down: writes to its keys 
 
 Automated in CI: protocol codec and the diagnostic rules (unit tests); the client, capability probe and `mg` metadata against memcached 1.4/1.5/1.6; eviction diagnosis on a 4 MB server; mcrouter config, route tracing and dead-destination behaviour with and without failover; and end-to-end tests that start the real `memcached-mcp` binary against memcached 1.4/1.5/1.6 and drive it over stdio and HTTP (write tools hidden by default, allowlist, write gating and key prefixes, audit log, bearer-token and Host checks, `/metrics`, refusal to start unsafely).
 
-Not covered by an automated end-to-end test: `mcrouter_compare_destinations` (verified by hand on a three-node topology), the mcrouter tool wiring over MCP (its analysis is tested), and concurrent or long-running HTTP sessions. The Linux and macOS release binaries have never been executed.
+Also automated: the mcrouter tools over MCP against a healthy three-node topology, including `mcrouter_compare_destinations` with a full mapping, a missing mapping, and a mapping outside the allowlist.
+
+Not covered by an automated end-to-end test: `mcrouter_compare_destinations` and the other mcrouter tools while a destination is down (the analysis itself is tested), and concurrent or long-running HTTP sessions. The Linux and macOS release binaries have never been executed.

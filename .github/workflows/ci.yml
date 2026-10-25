@@ -68,6 +68,11 @@ jobs:
       - run: cargo test -p mcrouter --test live -- --nocapture
         env:
           MCROUTER_ADDR: 127.0.0.1:11218
+      - name: mcrouter tools over MCP, including compare_destinations
+        run: cargo test -p mcp-server --test e2e mcrouter -- --nocapture
+        env:
+          MCROUTER_ADDR: 127.0.0.1:11218
+          MCROUTER_BACKENDS: 127.0.0.1:11219,127.0.0.1:11220,127.0.0.1:11221
       - name: Stop mc-a, then check behaviour with a dead destination
         run: |
           docker compose -f tests/compat/docker-compose.yml stop mc-a

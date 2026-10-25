@@ -365,3 +365,121 @@ async fn http_refuses_to_start_unsafely() {
         assert!(stderr.contains(needle), "expected '{needle}' in: {stderr}");
     }
 }
+
+/// mcrouter tools over MCP, against the healthy three-node topology from
+/// tests/compat/docker-compose.yml. Set MCROUTER_ADDR (e.g. 127.0.0.1:11218) and
+/// MCROUTER_BACKENDS (the host addresses of mc-a, mc-b, mc-c in that order); skipped otherwise.
+#[tokio::test]
+async fn mcrouter_tools_over_mcp() {
+    let (Ok(router), Ok(backends)) = (
+        std::env::var("MCROUTER_ADDR"),
+        std::env::var("MCROUTER_BACKENDS"),
+    ) else {
+        eprintln!("MCROUTER_ADDR / MCROUTER_BACKENDS not set, skipping");
+        return;
+    };
+    let backends: Vec<&str> = backends.split(',').collect();
+    assert_eq!(
+        backends.len(),
+        3,
+        "MCROUTER_BACKENDS needs the addresses of mc-a, mc-b, mc-c"
+    );
+    let names = ["mc-a:11211", "mc-b:11211", "mc-c:11211"];
+    let map = names
+        .iter()
+        .zip(&backends)
+        .map(|(n, b)| format!("{n}={b}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let allow = format!("{router},{}", backends.join(","));
+
+    let mut s = Stdio_::start(&[
+        ("MEMCACHED_MCP_ALLOWLIST", &allow),
+        ("MEMCACHED_MCP_DEST_MAP", &map),
+    ])
+    .await;
+    let json = |text: &str| {
+        serde_json::from_str::<Value>(text).unwrap_or_else(|_| panic!("not JSON: {text}"))
+    };
+
+    let (err, text) = s
+        .call("mcrouter_inspect_config", json!({"addr":router}))
+        .await;
+    assert!(!err, "{text}");
+    let cfg = json(&text);
+    assert_eq!(cfg["config"]["pools"][0]["servers"], json!(names));
+    assert_eq!(cfg["config"]["has_failover"], json!(false));
+    assert_eq!(cfg["findings"], json!([]));
+
+    let (err, text) = s
+        .call(
+            "mcrouter_trace_key_route",
+            json!({"addr":router,"key":"some-key","op":"set"}),
+        )
+        .await;
+    assert!(
+        !err && names.iter().any(|n| text == format!("destination: {n}")),
+        "{text}"
+    );
+    let (err, text) = s
+        .call(
+            "mcrouter_trace_key_route",
+            json!({"addr":router,"key":"k","op":"flush"}),
+        )
+        .await;
+    assert!(err && text.contains("get, set or delete"), "{text}");
+
+    let (err, text) = s.call("mcrouter_get_stats", json!({"addr":router})).await;
+    assert!(
+        !err && json(&text)["stats"]["num_servers"] == json!("3"),
+        "{text}"
+    );
+
+    let (err, text) = s
+        .call("mcrouter_diagnose_failover", json!({"addr":router}))
+        .await;
+    let codes: Vec<_> = json(&text)["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].clone())
+        .collect();
+    assert!(!err && codes == [json!("no_failover_configured")], "{text}");
+
+    // Every destination mapped and allowlisted: all three are inspected.
+    let (err, text) = s
+        .call("mcrouter_compare_destinations", json!({"addr":router}))
+        .await;
+    assert!(!err, "{text}");
+    let all = json(&text);
+    assert_eq!(all["inspected"], json!(names));
+    assert_eq!(all["unmapped"], json!([]));
+    assert_eq!(all["unreachable"], json!([]));
+
+    // A plain memcached is not an mcrouter.
+    let (err, text) = s
+        .call("mcrouter_inspect_config", json!({"addr":backends[0]}))
+        .await;
+    assert!(err && text.contains("mcrouter"), "{text}");
+
+    // Missing mapping and a mapping outside the allowlist are reported, never guessed or followed.
+    let partial_map = format!("{}={},{}={}", names[0], backends[0], names[1], backends[1]);
+    let partial_allow = format!("{router},{}", backends[0]);
+    let mut p = Stdio_::start(&[
+        ("MEMCACHED_MCP_ALLOWLIST", &partial_allow),
+        ("MEMCACHED_MCP_DEST_MAP", &partial_map),
+    ])
+    .await;
+    let (err, text) = p
+        .call("mcrouter_compare_destinations", json!({"addr":router}))
+        .await;
+    assert!(!err, "{text}");
+    let part = json(&text);
+    assert_eq!(part["inspected"], json!([names[0]]));
+    assert_eq!(part["unmapped"], json!([names[2]]));
+    let unreachable = part["unreachable"].as_array().unwrap();
+    assert!(
+        unreachable.len() == 1 && unreachable[0].as_str().unwrap().contains("ALLOWLIST"),
+        "{text}"
+    );
+}
