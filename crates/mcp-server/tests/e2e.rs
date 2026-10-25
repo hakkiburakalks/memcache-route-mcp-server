@@ -922,3 +922,45 @@ async fn metrics_include_mcrouter_and_flag_unreachable_targets() {
     );
     assert!(!body.contains("memcached_up"), "{body}");
 }
+
+/// Many sessions at once, each with several calls, must all succeed and stay independent.
+#[tokio::test]
+async fn concurrent_http_sessions_do_not_interfere() {
+    let Some(addr) = memcached_addr() else { return };
+    let mut child = command(
+        &[
+            ("MEMCACHED_MCP_ALLOWLIST", &addr),
+            ("MEMCACHED_MCP_HTTP_TOKEN", TOKEN),
+        ],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for n in 0..16 {
+        let addr = addr.clone();
+        tasks.spawn(async move {
+            let mut s = HttpMcp::start(port, TOKEN).await;
+            for _ in 0..5 {
+                let (err, text) = s.call("get_stats", json!({"addr":addr})).await;
+                assert!(!err, "session {n}: {text}");
+                let (err, text) = s
+                    .call(
+                        "get_key_metadata",
+                        json!({"addr":addr,"key":format!("conc:{n}")}),
+                    )
+                    .await;
+                assert!(!err, "session {n}: {text}");
+            }
+            n
+        });
+    }
+    let mut done = 0;
+    while let Some(r) = tasks.join_next().await {
+        r.expect("a session panicked");
+        done += 1;
+    }
+    assert_eq!(done, 16);
+}
