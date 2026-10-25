@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/memcached-protocol", "crates/memcached-core", "crates/mcp-server", "crates/diagnostics"]
+members = ["crates/memcached-protocol", "crates/memcached-core", "crates/mcp-server", "crates/diagnostics", "crates/mcrouter"]
 
 [workspace.package]
 version = "0.1.0"

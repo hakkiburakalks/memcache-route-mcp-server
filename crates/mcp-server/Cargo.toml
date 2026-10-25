@@ -12,6 +12,7 @@ path = "src/main.rs"
 memcached-core = { path = "../memcached-core" }
 memcached-protocol = { path = "../memcached-protocol" }
 diagnostics = { path = "../diagnostics" }
+mcrouter = { path = "../mcrouter" }
 rmcp = { version = "3.7.0", features = ["server", "transport-io", "macros"] }
 tokio.workspace = true
 serde = { version = "1", features = ["derive"] }

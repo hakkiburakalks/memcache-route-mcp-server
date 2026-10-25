@@ -309,10 +309,22 @@ name = "mcp-server"
 version = "0.1.0"
 dependencies = [
  "diagnostics",
+ "mcrouter",
  "memcached-core",
  "memcached-protocol",
  "rmcp",
  "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mcrouter"
+version = "0.1.0"
+dependencies = [
+ "diagnostics",
+ "memcached-core",
  "serde",
  "serde_json",
  "tokio",

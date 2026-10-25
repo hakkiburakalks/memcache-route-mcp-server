@@ -50,3 +50,17 @@ jobs:
       - run: cargo test -p memcached-core --test eviction -- --nocapture
         env:
           MEMCACHED_SMALL_ADDR: 127.0.0.1:11217
+
+  mcrouter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Start mcrouter with two memcached backends
+        run: |
+          docker compose -f tests/compat/docker-compose.yml up -d mcrouter
+          sleep 5
+      - run: cargo test -p mcrouter --test live -- --nocapture
+        env:
+          MCROUTER_ADDR: 127.0.0.1:11218

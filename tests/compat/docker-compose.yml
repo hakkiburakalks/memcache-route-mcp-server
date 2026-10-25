@@ -14,3 +14,14 @@ services:
     image: memcached:1.6
     command: ["-m", "4"]
     ports: ["11217:11211"]
+  # mcrouter in front of two memcached nodes; host port 11218.
+  mc-a:
+    image: memcached:1.6
+  mc-b:
+    image: memcached:1.6
+  mcrouter:
+    image: mcrouter/mcrouter
+    command: ["mcrouter", "--config-file=/etc/mcrouter.json", "-p", "5000"]
+    volumes: ["./mcrouter.json:/etc/mcrouter.json:ro"]
+    ports: ["11218:5000"]
+    depends_on: [mc-a, mc-b]

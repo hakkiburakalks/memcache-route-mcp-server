@@ -8,7 +8,7 @@
 | memcached 1.5.x | Verified (1.5.22) | No meta commands |
 | memcached 1.4.x | Verified (1.4.39) | No meta commands |
 | memcached 1.2 / 1.3 | Untested | Experimental, no real-server tests yet |
-| mcrouter | Not started | |
+| mcrouter | Verified (34.0.0) | Config, stats and route tracing via the memcached protocol; failover behaviour not tested |
 | AWS ElastiCache | Not tested | |
 
 Capabilities are probed at runtime (`version`, `mn`), not inferred from the version number.

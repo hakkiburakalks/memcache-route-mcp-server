@@ -37,6 +37,16 @@ struct CompareArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct TraceArgs {
+    /// mcrouter address as `host:port`; must be in the allowlist.
+    addr: String,
+    /// Key to trace.
+    key: String,
+    /// Operation: `get` (default), `set` or `delete`.
+    op: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct KeyArgs {
     /// Server address as `host:port`; must be in the allowlist.
     addr: String,
@@ -152,6 +162,62 @@ impl MemcachedServer {
             "unreachable": unreachable,
         }))
         .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Read mcrouter's `stats` and report destination health (down or suspect servers). Target must be an mcrouter, not a plain memcached.",
+        annotations(read_only_hint = true)
+    )]
+    async fn mcrouter_get_stats(
+        &self,
+        Parameters(a): Parameters<Target>,
+    ) -> Result<String, String> {
+        let mut c = self.connect(&a.addr).await?;
+        let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+        let findings = mcrouter::analyze_stats(&stats);
+        serde_json::to_string_pretty(&serde_json::json!({ "findings": findings, "stats": stats }))
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Fetch the config mcrouter is running (via __mcrouter__.preprocessed_config), list pools and their servers, and flag undefined, unused or empty pools and duplicate servers.",
+        annotations(read_only_hint = true)
+    )]
+    async fn mcrouter_inspect_config(
+        &self,
+        Parameters(a): Parameters<Target>,
+    ) -> Result<String, String> {
+        let mut c = self.connect(&a.addr).await?;
+        let (_, raw) = c
+            .get(mcrouter::CONFIG_KEY.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("server returned no config; is this an mcrouter?")?;
+        let text = String::from_utf8(raw).map_err(|e| e.to_string())?;
+        let cfg = mcrouter::parse_config(&text)?;
+        let findings = mcrouter::analyze_config(&cfg);
+        serde_json::to_string_pretty(&serde_json::json!({ "config": cfg, "findings": findings }))
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Ask mcrouter which destination server a key would be routed to for an operation (get, set or delete). Nothing is read or written.",
+        annotations(read_only_hint = true)
+    )]
+    async fn mcrouter_trace_key_route(
+        &self,
+        Parameters(a): Parameters<TraceArgs>,
+    ) -> Result<String, String> {
+        let op = a.op.as_deref().unwrap_or("get");
+        if !matches!(op, "get" | "set" | "delete") {
+            return Err(format!("op must be get, set or delete, got '{op}'"));
+        }
+        let mut c = self.connect(&a.addr).await?;
+        let probe = mcrouter::route_key(op, &a.key);
+        match c.get(probe.as_bytes()).await.map_err(|e| e.to_string())? {
+            Some((_, dest)) => Ok(format!("destination: {}", String::from_utf8_lossy(&dest))),
+            None => Err("mcrouter returned no route; is this an mcrouter?".to_owned()),
+        }
     }
 }
 
