@@ -2,3 +2,4 @@
 - tokio, rmcp 3.7 (features: server, transport-io, macros, transport-streamable-http-server), axum 0.8 (HTTP mode only), serde/serde_json, schemars 1, thiserror 2.
 - Compat tests: Docker (memcached 1.4/1.5/1.6, mcrouter 34.0.0 image `mcrouter/mcrouter`). `promtool` (image `prom/prometheus`) was used once to validate `/metrics` output.
 - Release targets: x86_64/aarch64 linux-musl, x86_64/aarch64 apple-darwin, x86_64 windows-msvc.
+- `Dockerfile`: rust:1-alpine build, `scratch` runtime, user 65532, ~7 MB; built (not pushed) by the CI `image` job. K8s untested.

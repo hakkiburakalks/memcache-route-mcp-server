@@ -10,6 +10,8 @@
 | memcached 1.2 / 1.3 | Untested | Experimental, no real-server tests yet |
 | mcrouter | Verified (34.0.0) | Config, stats, route tracing and failover behaviour via the memcached protocol (see below) |
 | AWS ElastiCache | Not tested | |
+| Docker | Image builds in CI; stdio and HTTP modes run against a memcached on the same Docker network (by hand) | |
+| Kubernetes | Not tested | |
 
 Key metadata (TTL, last access, fetched-before, CAS) comes from `mg` on servers where the `mn` probe succeeds (1.6.x here); older servers report only flags and size.
 

@@ -83,6 +83,26 @@ Download a binary for Linux, macOS or Windows from the releases page, or build f
 cargo build --release -p mcp-server
 ```
 
+## Docker
+
+```
+docker build -t memcached-mcp .
+```
+
+The image is a single static binary on `scratch` (about 7 MB), running as user 65532 with no shell. stdio is the default:
+
+```
+docker run -i --rm -e MEMCACHED_MCP_ALLOWLIST=cache:11211 memcached-mcp
+```
+
+For HTTP, the process has to bind `0.0.0.0` inside the container, which the server refuses unless `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`. Publish the port on loopback only, or put a TLS proxy in front:
+
+```
+docker run -d -p 127.0.0.1:8080:8080   -e MEMCACHED_MCP_ALLOWLIST=cache:11211 -e MEMCACHED_MCP_HTTP_TOKEN=...   -e MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1 memcached-mcp --http 0.0.0.0:8080
+```
+
+Both modes were tried against a memcached on the same Docker network. The image is built in CI but not published anywhere, and it has not been run on a Kubernetes cluster. In Kubernetes, keep the token in a Secret and expose the Service only through a TLS-terminating ingress.
+
 ## Use with Claude Code
 
 ```
