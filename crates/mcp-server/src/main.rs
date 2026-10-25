@@ -849,22 +849,29 @@ fn http_config(
         .map(str::to_owned)
         .collect();
     // /metrics must not become a way around the allowlist.
-    let metrics_targets: Vec<String> = std::env::var("MEMCACHED_MCP_METRICS_TARGETS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if let Some(bad) = metrics_targets.iter().find(|t| !allowlist.contains(*t)) {
-        return Err(format!(
-            "MEMCACHED_MCP_METRICS_TARGETS lists {bad}, which is not in MEMCACHED_MCP_ALLOWLIST"
-        ));
-    }
+    let targets = |var: &str| -> Result<Vec<String>, String> {
+        let list: Vec<String> = std::env::var(var)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        match list.iter().find(|t| !allowlist.contains(*t)) {
+            Some(bad) => Err(format!(
+                "{var} lists {bad}, which is not in MEMCACHED_MCP_ALLOWLIST"
+            )),
+            None => Ok(list),
+        }
+    };
+    let metrics = http::MetricsTargets {
+        memcached: targets("MEMCACHED_MCP_METRICS_TARGETS")?,
+        mcrouter: targets("MEMCACHED_MCP_MCROUTER_METRICS_TARGETS")?,
+    };
     Ok(http::HttpConfig {
         bind,
         tokens,
         allowed_hosts,
-        metrics_targets,
+        metrics,
     })
 }

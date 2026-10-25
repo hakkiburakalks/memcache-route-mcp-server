@@ -30,8 +30,14 @@ pub struct HttpConfig {
     pub tokens: TokenStore,
     /// Extra `Host` values to accept besides loopback (for use behind a proxy).
     pub allowed_hosts: Vec<String>,
-    /// memcached servers exposed on `/metrics`. Empty disables the endpoint.
-    pub metrics_targets: Vec<String>,
+    pub metrics: MetricsTargets,
+}
+
+/// Servers exposed on `/metrics`. With both lists empty the endpoint is absent.
+#[derive(Default)]
+pub struct MetricsTargets {
+    pub memcached: Vec<String>,
+    pub mcrouter: Vec<String>,
 }
 
 const SCRAPE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -45,21 +51,8 @@ async fn scrape(addr: &str) -> Option<diagnostics::Stats> {
         .ok()
 }
 
-/// Scrapes every target concurrently; an unreachable one is reported as `memcached_up 0`.
-async fn metrics(
-    State(targets): State<Arc<Vec<String>>>,
-    Extension(who): Extension<Identity>,
-) -> Response {
-    if let Err(e) = who.require(Perm::Metrics) {
-        return (
-            StatusCode::FORBIDDEN,
-            format!(
-                "{e}
-"
-            ),
-        )
-            .into_response();
-    }
+/// Scrapes every target concurrently; results keep the order of `targets`.
+async fn scrape_all(targets: &[String]) -> Vec<(String, Option<diagnostics::Stats>)> {
     let mut set = tokio::task::JoinSet::new();
     for (i, addr) in targets.iter().cloned().enumerate() {
         set.spawn(async move {
@@ -72,13 +65,41 @@ async fn metrics(
         nodes.push(node);
     }
     nodes.sort_by_key(|(i, _, _)| *i);
-    let nodes: Vec<_> = nodes
+    nodes
         .into_iter()
         .map(|(_, addr, stats)| (addr, stats))
-        .collect();
+        .collect()
+}
+
+/// An unreachable target is reported as `*_up 0`.
+async fn metrics(
+    State(targets): State<Arc<MetricsTargets>>,
+    Extension(who): Extension<Identity>,
+) -> Response {
+    if let Err(e) = who.require(Perm::Metrics) {
+        return (
+            StatusCode::FORBIDDEN,
+            format!(
+                "{e}
+"
+            ),
+        )
+            .into_response();
+    }
+    let (memcached, mcrouter) = tokio::join!(
+        scrape_all(&targets.memcached),
+        scrape_all(&targets.mcrouter)
+    );
+    let mut body = String::new();
+    if !memcached.is_empty() {
+        body.push_str(&diagnostics::prometheus::render(&memcached));
+    }
+    if !mcrouter.is_empty() {
+        body.push_str(&diagnostics::prometheus::render_mcrouter(&mcrouter));
+    }
     (
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        diagnostics::prometheus::render(&nodes),
+        body,
     )
         .into_response()
 }
@@ -177,10 +198,10 @@ where
         audit,
     };
     let mut app = Router::new().nest_service("/mcp", mcp);
-    if !cfg.metrics_targets.is_empty() {
+    if !cfg.metrics.memcached.is_empty() || !cfg.metrics.mcrouter.is_empty() {
         let metrics_routes = Router::new()
             .route("/metrics", get(metrics))
-            .with_state(Arc::new(cfg.metrics_targets));
+            .with_state(Arc::new(cfg.metrics));
         app = app.merge(metrics_routes);
     }
     // Layers added last run first and cover every route, /metrics included: host check, then token.

@@ -21,7 +21,7 @@ impl Kind {
 }
 
 /// (memcached stat, metric name, kind, help)
-const METRICS: &[(&str, &str, Kind, &str)] = &[
+const MEMCACHED_METRICS: &[(&str, &str, Kind, &str)] = &[
     (
         "uptime",
         "memcached_uptime_seconds",
@@ -120,6 +120,88 @@ const METRICS: &[(&str, &str, Kind, &str)] = &[
     ),
 ];
 
+/// mcrouter's own `stats`. Per-destination detail is not exposed, only the pool-wide counts.
+const MCROUTER_METRICS: &[(&str, &str, Kind, &str)] = &[
+    (
+        "uptime",
+        "mcrouter_uptime_seconds",
+        Kind::Gauge,
+        "Seconds since mcrouter started.",
+    ),
+    (
+        "num_servers",
+        "mcrouter_destinations",
+        Kind::Gauge,
+        "Destinations mcrouter knows about.",
+    ),
+    (
+        "num_servers_up",
+        "mcrouter_destinations_up",
+        Kind::Gauge,
+        "Destinations currently connected and healthy.",
+    ),
+    (
+        "num_servers_down",
+        "mcrouter_destinations_down",
+        Kind::Gauge,
+        "Destinations marked down.",
+    ),
+    (
+        "num_suspect_servers",
+        "mcrouter_destinations_suspect",
+        Kind::Gauge,
+        "Destinations with recent failures.",
+    ),
+    (
+        "num_clients",
+        "mcrouter_current_clients",
+        Kind::Gauge,
+        "Open client connections.",
+    ),
+    (
+        "successful_client_connections",
+        "mcrouter_client_connections_total",
+        Kind::Counter,
+        "Client connections accepted since start.",
+    ),
+    (
+        "cmd_get_count",
+        "mcrouter_commands_get_total",
+        Kind::Counter,
+        "Get requests routed.",
+    ),
+    (
+        "cmd_set_count",
+        "mcrouter_commands_set_total",
+        Kind::Counter,
+        "Set requests routed.",
+    ),
+    (
+        "cmd_delete_count",
+        "mcrouter_commands_delete_total",
+        Kind::Counter,
+        "Delete requests routed.",
+    ),
+    (
+        "destination_pending_reqs",
+        "mcrouter_destination_pending_requests",
+        Kind::Gauge,
+        "Requests queued for destinations.",
+    ),
+    (
+        "destination_inflight_reqs",
+        "mcrouter_destination_inflight_requests",
+        Kind::Gauge,
+        "Requests sent to destinations and awaiting a reply.",
+    ),
+    (
+        "ps_rss",
+        "mcrouter_resident_memory_bytes",
+        Kind::Gauge,
+        "Resident memory of the mcrouter process.",
+    ),
+];
+
 fn escape_label(v: &str) -> String {
     v.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -128,21 +210,42 @@ fn escape_label(v: &str) -> String {
 
 /// One scrape result per target: `Some(stats)` when reachable, `None` when it was not.
 pub fn render(nodes: &[(String, Option<Stats>)]) -> String {
+    render_with(
+        "memcached_up",
+        "Whether the last scrape of the server succeeded.",
+        MEMCACHED_METRICS,
+        nodes,
+    )
+}
+
+/// Same shape as [`render`], for mcrouter instances.
+pub fn render_mcrouter(nodes: &[(String, Option<Stats>)]) -> String {
+    render_with(
+        "mcrouter_up",
+        "Whether the last scrape of the mcrouter succeeded.",
+        MCROUTER_METRICS,
+        nodes,
+    )
+}
+
+fn render_with(
+    up_name: &str,
+    up_help: &str,
+    table: &[(&str, &str, Kind, &str)],
+    nodes: &[(String, Option<Stats>)],
+) -> String {
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "# HELP memcached_up Whether the last scrape of the server succeeded."
-    );
-    let _ = writeln!(out, "# TYPE memcached_up gauge");
+    let _ = writeln!(out, "# HELP {up_name} {up_help}");
+    let _ = writeln!(out, "# TYPE {up_name} gauge");
     for (addr, stats) in nodes {
         let _ = writeln!(
             out,
-            "memcached_up{{instance=\"{}\"}} {}",
+            "{up_name}{{instance=\"{}\"}} {}",
             escape_label(addr),
             u8::from(stats.is_some())
         );
     }
-    for (stat, name, kind, help) in METRICS {
+    for (stat, name, kind, help) in table {
         let samples: Vec<_> = nodes
             .iter()
             .filter_map(|(addr, stats)| {
@@ -211,5 +314,45 @@ mod tests {
     fn escapes_label_values() {
         let out = render(&[("we\"ird\\host".into(), None)]);
         assert!(out.contains(r#"instance="we\"ird\\host""#));
+    }
+
+    #[test]
+    fn renders_mcrouter_stats() {
+        let out = render_mcrouter(&[
+            (
+                "r:5000".into(),
+                Some(st(&[
+                    ("num_servers_down", "1"),
+                    ("cmd_get_count", "9"),
+                    ("version", "34"),
+                ])),
+            ),
+            ("s:5000".into(), None),
+        ]);
+        assert!(out.contains(
+            "mcrouter_up{instance=\"r:5000\"} 1
+"
+        ));
+        assert!(out.contains(
+            "mcrouter_up{instance=\"s:5000\"} 0
+"
+        ));
+        assert!(out.contains(
+            "# TYPE mcrouter_destinations_down gauge
+"
+        ));
+        assert!(out.contains(
+            "mcrouter_destinations_down{instance=\"r:5000\"} 1
+"
+        ));
+        assert!(out.contains(
+            "# TYPE mcrouter_commands_get_total counter
+"
+        ));
+        assert!(
+            !out.contains("memcached_"),
+            "no memcached metrics for mcrouter"
+        );
+        assert!(!out.contains("version"));
     }
 }

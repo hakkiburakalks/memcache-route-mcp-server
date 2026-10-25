@@ -24,6 +24,6 @@ Rust MCP server for Memcached/mcrouter ops + diagnostics. Repo: github.com/hakki
 
 ## Known gaps
 - `crates/mcp-server/tests/e2e.rs` drives the real binary (stdio + HTTP) in CI; also mcrouter tools incl. compare_destinations (healthy topology, needs `MCROUTER_ADDR` + `MCROUTER_BACKENDS`). Not automated: mcrouter tools with a dead destination over MCP, concurrent/long HTTP sessions.
-- Per-user RBAC (auth.rs, MEMCACHED_MCP_HTTP_TOKEN_FILE, `new-token`) exists for HTTP only; stdio is trusted. No token expiry/rotation. mcrouter not in `/metrics`; `sample_keys` cannot sample randomly (crawler order).
+- Per-user RBAC (auth.rs, MEMCACHED_MCP_HTTP_TOKEN_FILE, `new-token`) exists for HTTP only; stdio is trusted. No token expiry/rotation. `sample_keys` cannot sample randomly (crawler order).
 
 See `mem:tech_stack`, `mem:suggested_commands`, `mem:conventions`, `mem:task_completion`.

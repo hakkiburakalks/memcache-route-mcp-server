@@ -90,7 +90,7 @@ scrape_configs:
     static_configs: [{ targets: ["127.0.0.1:8080"] }]
 ```
 
-`/metrics` uses the same bearer token and is absent unless targets are configured. It exports raw counters and gauges (`memcached_get_hits_total`, `memcached_evictions_total`, `memcached_used_bytes`, ...) labelled by `instance`, plus `memcached_up` (0 when a target is unreachable). Ratios and rates are left to PromQL, e.g. `rate(memcached_get_hits_total[5m]) / (rate(memcached_get_hits_total[5m]) + rate(memcached_get_misses_total[5m]))`. Scrapes are not written to the audit log. mcrouter targets are not exported yet, only memcached servers. The output passes `promtool check metrics`.
+`/metrics` uses the same bearer token and is absent unless targets are configured. It exports raw counters and gauges (`memcached_get_hits_total`, `memcached_evictions_total`, `memcached_used_bytes`, ...) labelled by `instance`, plus `memcached_up` (0 when a target is unreachable). Ratios and rates are left to PromQL, e.g. `rate(memcached_get_hits_total[5m]) / (rate(memcached_get_hits_total[5m]) + rate(memcached_get_misses_total[5m]))`. Scrapes are not written to the audit log. mcrouter instances can be added with `MEMCACHED_MCP_MCROUTER_METRICS_TARGETS` (also allowlisted); they export `mcrouter_up`, destination counts (`mcrouter_destinations`, `_up`, `_down`, `_suspect`), client connections, routed get/set/delete counts, queue depth and memory. Per-destination detail is not exported, because mcrouter's `stats` does not report it. The output passes `promtool check metrics`.
 
 ## mcrouter destinations
 

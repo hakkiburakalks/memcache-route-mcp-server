@@ -883,3 +883,42 @@ async fn http_refuses_ambiguous_or_broken_auth_config() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// mcrouter counters on /metrics. Set MCROUTER_ADDR (e.g. 127.0.0.1:11218); skipped otherwise.
+#[tokio::test]
+async fn metrics_include_mcrouter_and_flag_unreachable_targets() {
+    let Ok(router) = std::env::var("MCROUTER_ADDR") else {
+        eprintln!("MCROUTER_ADDR not set, skipping");
+        return;
+    };
+    let dead = "127.0.0.1:1";
+    let allow = format!("{router},{dead}");
+    let targets = format!("{router},{dead}");
+    let mut child = command(
+        &[
+            ("MEMCACHED_MCP_ALLOWLIST", &allow),
+            ("MEMCACHED_MCP_HTTP_TOKEN", TOKEN),
+            ("MEMCACHED_MCP_MCROUTER_METRICS_TARGETS", &targets),
+        ],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+    let auth = format!("Bearer {TOKEN}");
+    let (status, body) = http_get(port, "/metrics", &[("Authorization", &auth)]).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(&format!("mcrouter_up{{instance=\"{router}\"}} 1")),
+        "{body}"
+    );
+    assert!(
+        body.contains(&format!("mcrouter_up{{instance=\"{dead}\"}} 0")),
+        "{body}"
+    );
+    assert!(
+        body.contains(&format!("mcrouter_destinations{{instance=\"{router}\"}} 3")),
+        "{body}"
+    );
+    assert!(!body.contains("memcached_up"), "{body}");
+}
