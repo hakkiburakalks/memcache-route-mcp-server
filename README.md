@@ -126,7 +126,9 @@ docker run -i --rm -e MEMCACHED_MCP_ALLOWLIST=cache:11211 memcached-mcp
 For HTTP, the process has to bind `0.0.0.0` inside the container, which the server refuses unless `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`. Publish the port on loopback only, or put a TLS proxy in front:
 
 ```
-docker run -d -p 127.0.0.1:8080:8080 \n  -e MEMCACHED_MCP_ALLOWLIST=cache:11211 -e MEMCACHED_MCP_HTTP_TOKEN=... \n  -e MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1 memcached-mcp --http 0.0.0.0:8080
+docker run -d -p 127.0.0.1:8080:8080 \
+  -e MEMCACHED_MCP_ALLOWLIST=cache:11211 -e MEMCACHED_MCP_HTTP_TOKEN=... \
+  -e MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1 memcached-mcp --http 0.0.0.0:8080
 ```
 
 Both modes were tried against a memcached on the same Docker network. The image is built in CI but not published anywhere, and it has not been run on a Kubernetes cluster (see the Helm chart below).
@@ -137,7 +139,10 @@ A chart is in `deploy/helm/memcached-mcp`. It runs the HTTP transport as a non-r
 
 ```
 kubectl create secret generic memcached-mcp-auth --from-file=tokens.json
-helm install mcp deploy/helm/memcached-mcp \n  --set image.repository=registry.example.com/memcached-mcp --set image.tag=0.1.0-alpha.2 \n  --set 'allowlist={memcached-0.memcached:11211}' \n  --set auth.existingSecret=memcached-mcp-auth
+helm install mcp deploy/helm/memcached-mcp \
+  --set image.repository=registry.example.com/memcached-mcp --set image.tag=0.1.0-alpha.2 \
+  --set 'allowlist={memcached-0.memcached:11211}' \
+  --set auth.existingSecret=memcached-mcp-auth
 ```
 
 The pod speaks plain HTTP, so expose the Service only through a TLS-terminating ingress and set `allowedHosts` to its public name. The chart lints and renders in CI, but it has not been installed on a cluster. The image is not published, so you have to build and push it yourself.
