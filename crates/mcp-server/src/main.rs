@@ -127,18 +127,27 @@ impl MemcachedServer {
     }
 
     #[tool(
-        description = "Check whether a key exists and return its flags and size. The value itself is never returned.",
+        description = "Check whether a key exists and return its metadata; the value itself is never returned. On servers with meta commands (1.6+) this also reports remaining TTL, seconds since last access, whether it was fetched before, and CAS; older servers report only flags and size. Does not change the item's LRU position or fetched-before state, but the lookup still counts in the server's get_hits/get_misses totals.",
         annotations(read_only_hint = true)
     )]
     async fn get_key_metadata(&self, Parameters(a): Parameters<KeyArgs>) -> Result<String, String> {
         let mut c = self.connect(&a.addr).await?;
-        match c.get(a.key.as_bytes()).await.map_err(|e| e.to_string())? {
-            Some((flags, data)) => Ok(format!(
-                "found: true\nflags: {flags}\nbytes: {}",
-                data.len()
-            )),
-            None => Ok("found: false".to_owned()),
-        }
+        let caps = c.probe().await.map_err(|e| e.to_string())?;
+        let key = a.key.as_bytes();
+        let body = if caps.meta {
+            let info = c.meta_info(key).await.map_err(|e| e.to_string())?;
+            serde_json::json!({ "source": "meta", "found": info.is_some(), "info": info })
+        } else {
+            let hit = c.get(key).await.map_err(|e| e.to_string())?;
+            serde_json::json!({
+                "source": "classic",
+                "found": hit.is_some(),
+                "info": hit.map(|(flags, data)| serde_json::json!({
+                    "client_flags": flags, "size": data.len(),
+                })),
+            })
+        };
+        serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
     }
 
     #[tool(

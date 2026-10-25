@@ -136,6 +136,53 @@ pub fn encode_meta_noop() -> Vec<u8> {
     b"mn\r\n".to_vec()
 }
 
+/// `mg <key> <flags>`: meta get. Without the `v` flag the value is not sent back.
+pub fn encode_meta_get(key: &[u8], flags: &str) -> Result<Vec<u8>, ProtocolError> {
+    validate_key(key)?;
+    let mut out = b"mg ".to_vec();
+    out.extend_from_slice(key);
+    if !flags.is_empty() {
+        out.push(b' ');
+        out.extend_from_slice(flags.as_bytes());
+    }
+    out.extend_from_slice(b"\r\n");
+    Ok(out)
+}
+
+/// Reply to `mg` without the `v` flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetaGet {
+    /// `HD <flags>`: each returned flag is its letter plus value, e.g. `('s', "5")`.
+    Hit(Vec<(char, String)>),
+    /// `EN`
+    Miss,
+}
+
+pub fn parse_meta_get(line: &str) -> Result<MetaGet, ProtocolError> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if line == "EN" {
+        return Ok(MetaGet::Miss);
+    }
+    if line == "HD" || line.starts_with("HD ") {
+        let flags = line
+            .split(' ')
+            .skip(1)
+            .filter_map(|t| {
+                let mut ch = t.chars();
+                ch.next().map(|c| (c, ch.as_str().to_owned()))
+            })
+            .collect();
+        return Ok(MetaGet::Hit(flags));
+    }
+    if line.starts_with("ERROR")
+        || line.starts_with("SERVER_ERROR")
+        || line.starts_with("CLIENT_ERROR")
+    {
+        return Err(ProtocolError::Server(line.to_owned()));
+    }
+    Err(ProtocolError::Malformed(line.to_owned()))
+}
+
 /// Single-line replies to storage/touch/delete/arith commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -276,6 +323,28 @@ mod tests {
         assert_eq!(encode_arith(b"c", 5, true).unwrap(), b"incr c 5\r\n");
         assert_eq!(encode_arith(b"c", 5, false).unwrap(), b"decr c 5\r\n");
         assert_eq!(encode_meta_noop(), b"mn\r\n");
+    }
+
+    #[test]
+    fn meta_get_roundtrip() {
+        assert_eq!(encode_meta_get(b"k", "s t").unwrap(), b"mg k s t\r\n");
+        assert_eq!(encode_meta_get(b"k", "").unwrap(), b"mg k\r\n");
+        assert_eq!(
+            parse_meta_get("HD s5 t-1 h0\r\n").unwrap(),
+            MetaGet::Hit(vec![
+                ('s', "5".into()),
+                ('t', "-1".into()),
+                ('h', "0".into())
+            ])
+        );
+        assert_eq!(parse_meta_get("HD\r\n").unwrap(), MetaGet::Hit(vec![]));
+        assert_eq!(parse_meta_get("EN\r\n").unwrap(), MetaGet::Miss);
+        // Older servers answer unknown commands with a bare ERROR.
+        assert!(matches!(
+            parse_meta_get("ERROR\r\n"),
+            Err(ProtocolError::Server(_))
+        ));
+        assert!(parse_meta_get("VALUE x").is_err());
     }
 
     #[test]

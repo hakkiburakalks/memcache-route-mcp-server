@@ -13,7 +13,8 @@ Rust MCP server for Memcached/mcrouter ops + diagnostics. Plan: `C:\Users\burak\
 ## Invariants
 - Protocol crate stays I/O-free; policy (timeouts, allowlist, read-only) lives above it.
 - Capability detection by probing (`version`, `stats settings`, `mn`), never by version number alone.
-- Read-only by default; writes need explicit flag. Values redacted by default; credentials never logged.
+- Read-only by default; write tools only registered when `MEMCACHED_MCP_ALLOW_WRITE=1` (hidden and uncallable otherwise). Writes + denied targets go to the audit log (`MEMCACHED_MCP_AUDIT_LOG`, else stderr; stdout is the MCP channel).
+- rmcp handles requests concurrently: tests that pipe several calls at once get out-of-order results; space them out. Values redacted by default; credentials never logged.
 - Priority order: text + meta protocol first, binary/SASL later. Generic memcached before mcrouter.
 - Platforms: Linux and macOS first, Windows later. No Unix-only code outside `cfg` gates.
 

@@ -18,7 +18,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | --- | --- |
 | `server_info` | Version and whether meta commands are supported |
 | `get_stats` | `stats`, optionally a group (`settings`, `items`, `slabs`, ...) |
-| `get_key_metadata` | Does a key exist; flags and size |
+| `get_key_metadata` | Does a key exist; size and flags, plus TTL, last access, fetched-before and CAS on servers with meta commands |
 | `diagnose_node` | Hit ratio, evictions vs memory, connection limits, eviction skew |
 | `compare_nodes` | Outlier item counts and hit ratios across 3+ nodes |
 | `mcrouter_get_stats` | mcrouter stats and destination health |

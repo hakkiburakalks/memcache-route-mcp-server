@@ -2,4 +2,4 @@
 
 pub mod client;
 
-pub use client::{Capabilities, Client, ClientError};
+pub use client::{Capabilities, Client, ClientError, KeyInfo};

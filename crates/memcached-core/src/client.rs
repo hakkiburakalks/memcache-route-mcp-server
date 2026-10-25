@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use memcached_protocol::text::{self, ProtocolError, Status, StoreCmd};
+use memcached_protocol::text::{self, MetaGet, ProtocolError, Status, StoreCmd};
+use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -24,6 +25,19 @@ pub enum ClientError {
 pub struct Capabilities {
     pub version: String,
     pub meta: bool,
+}
+
+/// What `mg` reports about a stored item, without its value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyInfo {
+    pub size: u64,
+    pub client_flags: u32,
+    /// None when the item never expires.
+    pub ttl_seconds: Option<i64>,
+    pub seconds_since_access: Option<u64>,
+    /// Whether the item has been fetched since it was stored.
+    pub hit_before: bool,
+    pub cas: Option<u64>,
 }
 
 pub struct Client {
@@ -123,6 +137,36 @@ impl Client {
     pub async fn touch(&mut self, key: &[u8], exptime: i64) -> Result<Status, ClientError> {
         self.send(&text::encode_touch(key, exptime)?).await?;
         Ok(text::parse_status_line(&self.line().await?)?)
+    }
+
+    /// Key metadata via `mg` without fetching the value. Requires meta support (see `probe`).
+    ///
+    /// Uses the `u` flag so the item's LRU position, last-access time and fetched-before bit are
+    /// left alone. The server's global `get_hits`/`get_misses` counters still count the lookup.
+    pub async fn meta_info(&mut self, key: &[u8]) -> Result<Option<KeyInfo>, ClientError> {
+        self.send(&text::encode_meta_get(key, "s f t l h c u")?)
+            .await?;
+        match text::parse_meta_get(&self.line().await?)? {
+            MetaGet::Miss => Ok(None),
+            MetaGet::Hit(flags) => {
+                let find = |c: char| flags.iter().find(|(f, _)| *f == c).map(|(_, v)| v.as_str());
+                let malformed = |what: &str| ProtocolError::Malformed(format!("mg flag {what}"));
+                let int = |c: char| -> Result<Option<i64>, ProtocolError> {
+                    find(c)
+                        .map(|v| v.parse().map_err(|_| malformed(v)))
+                        .transpose()
+                };
+                Ok(Some(KeyInfo {
+                    size: int('s')?.unwrap_or(0) as u64,
+                    client_flags: int('f')?.unwrap_or(0) as u32,
+                    // `t-1` means the item never expires.
+                    ttl_seconds: int('t')?.filter(|t| *t >= 0),
+                    seconds_since_access: int('l')?.map(|l| l as u64),
+                    hit_before: find('h') == Some("1"),
+                    cas: find('c').and_then(|v| v.parse().ok()),
+                }))
+            }
+        }
     }
 
     /// Probes the server: `version`, then `mn` to detect meta command support.
