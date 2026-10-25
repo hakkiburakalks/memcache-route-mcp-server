@@ -44,7 +44,7 @@ The endpoint is `/mcp`. Clients must send `Authorization: Bearer <token>`; reque
 
 - The token is mandatory; the server refuses to start without one of at least 24 characters.
 - There is no TLS. Binding to anything other than loopback is refused unless `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`, because the token would cross the network in clear text. Put a TLS-terminating proxy in front and bind to loopback.
-- `Host` headers are checked against loopback names to block DNS rebinding. Behind a proxy, list the public hostnames in `MEMCACHED_MCP_HTTP_ALLOWED_HOSTS` (comma-separated).
+- `Host` headers are checked against loopback names on every route (including `/metrics`) to block DNS rebinding. Behind a proxy, list the public hostnames in `MEMCACHED_MCP_HTTP_ALLOWED_HOSTS` (comma-separated).
 - One shared token means one identity: the audit log does not say which user did what. Per-user auth and RBAC are not implemented.
 
 ### Prometheus metrics

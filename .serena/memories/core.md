@@ -8,7 +8,7 @@ Rust MCP server for Memcached/mcrouter ops + diagnostics. Repo: github.com/hakki
 - `diagnostics`: pure rules over `stats` maps (`analyze_node`, `compare_nodes`) + `prometheus::render`. Thresholds are heuristics.
 - `mcrouter`: pure analysis of mcrouter output (config via `__mcrouter__.preprocessed_config`, stats, failover diagnosis, route trace, `parse_dest_map`).
 - `mcp-server`: bin `memcached-mcp` (rmcp 3.7). stdio by default, `--http ADDR` for Streamable HTTP (`src/http.rs`, axum). `src/audit.rs` = JSON audit log.
-- Tests: unit tests inline; live tests are env-gated and skip when unset (`MEMCACHED_ADDR`, `MEMCACHED_SMALL_ADDR`, `MCROUTER_ADDR`, `MCROUTER_PLAIN_ADDR`+`MCROUTER_FAILOVER_ADDR`). Topology: `tests/compat/docker-compose.yml`.
+- Tests: unit tests inline; `e2e` needs `MEMCACHED_ADDR`; live tests are env-gated and skip when unset (`MEMCACHED_ADDR`, `MEMCACHED_SMALL_ADDR`, `MCROUTER_ADDR`, `MCROUTER_PLAIN_ADDR`+`MCROUTER_FAILOVER_ADDR`). Topology: `tests/compat/docker-compose.yml`.
 - CI `.github/workflows/ci.yml`: Linux+macOS build; memcached 1.4/1.5/1.6 matrix; mcrouter job (stops `mc-a` for the failover test). `release.yml`: 5 targets, tag `v*` publishes (tags containing `-` are prereleases).
 
 ## Invariants
@@ -22,7 +22,7 @@ Rust MCP server for Memcached/mcrouter ops + diagnostics. Repo: github.com/hakki
 - Platforms: Linux and macOS first, Windows built and smoke-tested too. No Unix-only code outside `cfg` gates.
 
 ## Known gaps
-- No automated end-to-end test of the MCP binary (compare_destinations, HTTP auth, /metrics were verified by hand only).
+- `crates/mcp-server/tests/e2e.rs` drives the real binary (stdio + HTTP) in CI; `mcrouter_compare_destinations` and concurrent/long HTTP sessions still have no automated end-to-end test.
 - No per-user auth/RBAC; no key inventory (`lru_crawler metadump`); mcrouter not in `/metrics`.
 
 See `mem:tech_stack`, `mem:suggested_commands`, `mem:conventions`, `mem:task_completion`.

@@ -43,6 +43,10 @@ jobs:
       - run: cargo test -p memcached-core --test live -- --nocapture
         env:
           MEMCACHED_ADDR: 127.0.0.1:11211
+      - name: End-to-end tests of the MCP binary (stdio and HTTP)
+        run: cargo test -p mcp-server --test e2e -- --nocapture
+        env:
+          MEMCACHED_ADDR: 127.0.0.1:11211
       - name: Start 4 MB memcached for the eviction test
         run: |
           docker run -d --name small -p 11217:11211 memcached:${{ matrix.version }} -m 4

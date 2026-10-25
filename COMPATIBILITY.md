@@ -29,6 +29,6 @@ With a plain `PoolRoute`, once a destination is marked down: writes to its keys 
 
 ## What is and is not covered by automated tests
 
-Automated in CI: protocol codec and the diagnostic rules (unit tests); the client, capability probe and `mg` metadata against memcached 1.4/1.5/1.6; eviction diagnosis on a 4 MB server; mcrouter config, route tracing and dead-destination behaviour with and without failover.
+Automated in CI: protocol codec and the diagnostic rules (unit tests); the client, capability probe and `mg` metadata against memcached 1.4/1.5/1.6; eviction diagnosis on a 4 MB server; mcrouter config, route tracing and dead-destination behaviour with and without failover; and end-to-end tests that start the real `memcached-mcp` binary against memcached 1.4/1.5/1.6 and drive it over stdio and HTTP (write tools hidden by default, allowlist, write gating and key prefixes, audit log, bearer-token and Host checks, `/metrics`, refusal to start unsafely).
 
-Verified by hand only, with no automated end-to-end test of the binary: the MCP tool wiring (write gating and key prefixes, audit log), `mcrouter_compare_destinations`, the HTTP transport and its authentication, and the `/metrics` endpoint. Their pure helpers (token comparison, Prometheus rendering, destination parsing) do have unit tests.
+Not covered by an automated end-to-end test: `mcrouter_compare_destinations` (verified by hand on a three-node topology), the mcrouter tool wiring over MCP (its analysis is tested), and concurrent or long-running HTTP sessions. The Linux and macOS release binaries have never been executed.

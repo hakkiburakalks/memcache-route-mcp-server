@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, WWW_AUTHENTICATE};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -83,6 +83,43 @@ fn bearer_matches(header: Option<&str>, token: &str) -> bool {
         .is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes()))
 }
 
+/// The hostname in a `Host` header, without port or IPv6 brackets.
+fn host_name(header: &str) -> &str {
+    if let Some(rest) = header.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match header.rsplit_once(':') {
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => header,
+    }
+}
+
+/// Entries are bare hostnames (any port) or `host:port` authorities.
+fn host_allowed(header: &str, allowed: &[String]) -> bool {
+    let name = host_name(header);
+    allowed
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(header) || a.eq_ignore_ascii_case(name))
+}
+
+/// Applies the DNS-rebinding check to every route, `/metrics` included.
+async fn require_known_host(
+    State(allowed): State<Arc<Vec<String>>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let ok = req
+        .headers()
+        .get(HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|h| host_allowed(h, &allowed));
+    if ok {
+        next.run(req).await
+    } else {
+        (StatusCode::FORBIDDEN, "forbidden host\n").into_response()
+    }
+}
+
 #[derive(Clone)]
 struct Auth {
     token: Arc<String>,
@@ -122,6 +159,7 @@ where
 {
     let mut hosts: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
     hosts.extend(cfg.allowed_hosts);
+    let known_hosts = Arc::new(hosts.clone());
     let mcp = StreamableHttpService::new(
         move || Ok(server.clone()),
         Arc::new(LocalSessionManager::default()),
@@ -138,8 +176,13 @@ where
             .with_state(Arc::new(cfg.metrics_targets));
         app = app.merge(metrics_routes);
     }
-    // Added last so it covers every route, /metrics included.
-    let app = app.layer(middleware::from_fn_with_state(auth, require_token));
+    // Layers added last run first and cover every route, /metrics included: host check, then token.
+    let app = app
+        .layer(middleware::from_fn_with_state(auth, require_token))
+        .layer(middleware::from_fn_with_state(
+            known_hosts,
+            require_known_host,
+        ));
 
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     eprintln!("listening on http://{}/mcp", listener.local_addr()?);
@@ -161,6 +204,35 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abcd"));
         assert!(!constant_time_eq(b"", b"a"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn host_header_matching() {
+        let allowed: Vec<String> = ["localhost", "127.0.0.1", "::1", "cache.example.com:8443"]
+            .map(String::from)
+            .to_vec();
+        for ok in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1:9",
+            "[::1]:8080",
+            "[::1]",
+            "LOCALHOST",
+            "cache.example.com:8443",
+        ] {
+            assert!(host_allowed(ok, &allowed), "{ok} should be allowed");
+        }
+        for bad in [
+            "evil.example.com",
+            "evil.example.com:8080",
+            "127.0.0.1.evil.com",
+            "cache.example.com",
+            "cache.example.com:1",
+            "",
+            "localhost.evil.com:80",
+        ] {
+            assert!(!host_allowed(bad, &allowed), "{bad} should be refused");
+        }
     }
 
     #[test]
