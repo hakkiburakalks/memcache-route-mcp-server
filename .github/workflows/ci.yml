@@ -104,6 +104,11 @@ jobs:
           ! helm template t deploy/helm/memcached-mcp
           ! helm template t deploy/helm/memcached-mcp --set 'allowlist={a:11211}'
       - run: helm template t deploy/helm/memcached-mcp --set 'allowlist={a:11211}' --set auth.existingSecret=s --set auth.mode=token > /dev/null
+      - name: The Service's own DNS names are accepted in the Host check
+        run: |
+          out=$(helm template t deploy/helm/memcached-mcp -n prod --set 'allowlist={a:11211}' --set auth.existingSecret=s --set 'allowedHosts={mcp.example.com}')
+          echo "$out" | grep -A1 MEMCACHED_MCP_HTTP_ALLOWED_HOSTS
+          echo "$out" | grep -q 'value: "t-memcached-mcp,t-memcached-mcp.prod,t-memcached-mcp.prod.svc,t-memcached-mcp.prod.svc.cluster.local,mcp.example.com"'
 
   audit:
     runs-on: ubuntu-latest

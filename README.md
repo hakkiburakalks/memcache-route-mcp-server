@@ -149,7 +149,7 @@ helm install mcp deploy/helm/memcached-mcp \
   --set auth.existingSecret=memcached-mcp-auth
 ```
 
-The pod speaks plain HTTP, so expose the Service only through a TLS-terminating ingress and set `allowedHosts` to its public name. The chart lints and renders in CI, but it has not been installed on a cluster. The image is not published, so you have to build and push it yourself.
+The pod speaks plain HTTP, so expose the Service only through a TLS-terminating ingress and add its public name to `allowedHosts` (the Service's own DNS names, such as `mcp-memcached-mcp.<namespace>.svc`, are accepted automatically so in-cluster clients and Prometheus work). The chart lints and renders in CI, but it has not been installed on a cluster. The image is not published, so you have to build and push it yourself.
 
 ## Use with Claude Code
 

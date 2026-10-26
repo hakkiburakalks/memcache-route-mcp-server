@@ -18,8 +18,11 @@ auth:
   tokenKey: token
   fileKey: tokens.json
 
-# Extra Host header names accepted besides loopback (the public name of the ingress).
+# Extra Host header names accepted besides loopback and the Service's own DNS names
+# (<name>, <name>.<namespace>, <name>.<namespace>.svc, <name>.<namespace>.svc.<clusterDomain>).
+# Add the public name of the ingress here.
 allowedHosts: []
+clusterDomain: cluster.local
 
 # Servers exposed on /metrics (each must also be in allowlist).
 metrics:

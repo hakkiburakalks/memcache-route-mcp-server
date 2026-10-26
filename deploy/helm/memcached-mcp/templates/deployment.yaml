@@ -49,10 +49,12 @@ spec:
             - name: MEMCACHED_MCP_HTTP_TOKEN_FILE
               value: /etc/memcached-mcp/{{ .Values.auth.fileKey }}
             {{- end }}
-            {{- with .Values.allowedHosts }}
+            # The Service's own DNS names, so in-cluster clients and Prometheus pass the Host check.
+            {{- $svc := include "memcached-mcp.fullname" . }}
+            {{- $ns := .Release.Namespace }}
+            {{- $own := list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.%s" $svc $ns .Values.clusterDomain) }}
             - name: MEMCACHED_MCP_HTTP_ALLOWED_HOSTS
-              value: {{ join "," . | quote }}
-            {{- end }}
+              value: {{ join "," (concat $own .Values.allowedHosts) | quote }}
             {{- with .Values.metrics.memcachedTargets }}
             - name: MEMCACHED_MCP_METRICS_TARGETS
               value: {{ join "," . | quote }}
