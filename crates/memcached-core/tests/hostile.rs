@@ -106,3 +106,61 @@ async fn stats_group_with_a_second_command_never_reaches_the_wire() {
     drop(c);
     assert!(seen.await.unwrap().is_empty());
 }
+
+fn dump_lines(n: usize) -> Vec<u8> {
+    let mut out = b"OK\r\n".to_vec();
+    for i in 0..n {
+        out.extend_from_slice(
+            format!("key=k%3A{i} exp=-1 la=1 cas=1 fetch=no cls=1 size=10 flags=0\r\n").as_bytes(),
+        );
+    }
+    out.extend_from_slice(b"END\r\n");
+    out
+}
+
+#[tokio::test]
+async fn uniform_sample_covers_the_whole_dump_not_just_its_start() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(&dump_lines(20_000)).await;
+    })
+    .await;
+    let c = Client::connect(&addr, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let sample = c
+        .sample_keys_uniform(1_000, 1_000_000, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert!(sample.complete);
+    assert_eq!((sample.seen, sample.entries.len()), (20_000, 1_000));
+    let index = |e: &memcached_protocol::text::DumpEntry| -> usize {
+        e.key.rsplit(':').next().unwrap().parse().unwrap()
+    };
+    // Expected 500 from each half (sd about 16); a prefix-only sample would give 1000 / 0.
+    let late = sample.entries.iter().filter(|e| index(e) >= 10_000).count();
+    assert!(
+        (380..=620).contains(&late),
+        "{late} of 1000 from the second half"
+    );
+    let mut keys: Vec<_> = sample.entries.iter().map(|e| e.key.clone()).collect();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), 1_000, "no item may be kept twice");
+}
+
+#[tokio::test]
+async fn uniform_sample_reports_a_capped_scan_as_incomplete() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(&dump_lines(5_000)).await;
+    })
+    .await;
+    let c = Client::connect(&addr, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let sample = c
+        .sample_keys_uniform(100, 1_000, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert!(!sample.complete);
+    assert_eq!((sample.seen, sample.entries.len()), (1_000, 100));
+}

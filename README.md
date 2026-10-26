@@ -32,7 +32,7 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | `sample_keys` | What is stored: items, bytes and never-fetched counts per key prefix, from the LRU crawler's metadata dump. Only with `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1` |
 | `set_key`, `delete_key`, `touch_key` | Writes; only with `MEMCACHED_MCP_ALLOW_WRITE=1` |
 
-`sample_keys` puts load on the server (it uses the LRU crawler), reads at most `max_scan` items (10,000 by default, 100,000 at most) and says so when it stopped early. The crawler's order is not random, so a partial scan is biased. It needs the crawler to be enabled, which it is on 1.5 and 1.6 but not by default on 1.4 (`-o lru_crawler`).
+`sample_keys` puts load on the server (it uses the LRU crawler), reads at most `max_scan` items (10,000 by default, 100,000 at most) and says so when it stopped early. The crawler's order is not random, so a partial scan is biased. Pass `uniform: true` to read the whole dump instead and keep a random sample of `max_scan` items: the totals are then scaled-up estimates for the whole cache (a full crawl, capped at 2 million items or 60 seconds; if the cap is hit the result says it is not random). It needs the crawler to be enabled, which it is on 1.5 and 1.6 but not by default on 1.4 (`-o lru_crawler`).
 
 Diagnostic thresholds are heuristics and have not been tuned on production traffic. Looking up a key's metadata still counts in the server's global `get_hits`/`get_misses` totals, though it leaves the item's LRU position and fetched-before state alone.
 

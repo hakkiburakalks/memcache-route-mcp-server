@@ -484,15 +484,21 @@ struct SampleArgs {
     include_keys: Option<bool>,
     /// How many individual keys to return when include_keys is set (default 50, at most 500).
     max_keys: Option<usize>,
+    /// Read the whole dump and keep a random sample of max_scan items, so totals are unbiased
+    /// estimates for the whole cache. Costs a full crawl (stops after 2 million items or 60 s).
+    uniform: Option<bool>,
 }
 
 const DEFAULT_SCAN: usize = 10_000;
 const MAX_SCAN: usize = 100_000;
+/// A uniform sample reads the whole dump, so it is capped in items and in time.
+const UNIFORM_MAX_READ: u64 = 2_000_000;
+const UNIFORM_DEADLINE: Duration = Duration::from_secs(60);
 
 #[tool_router(router = inventory_router)]
 impl MemcachedServer {
     #[tool(
-        description = "Sample what is stored in a memcached by walking its LRU crawler metadata dump (values are never read). Returns items, bytes and never-fetched counts per key prefix, plus individual keys only if enabled. Imposes crawler load, scans in the crawler's order rather than randomly (a partial scan is biased), and needs the LRU crawler enabled (off by default on 1.4).",
+        description = "Sample what is stored in a memcached by walking its LRU crawler metadata dump (values are never read). Returns items, bytes and never-fetched counts per key prefix, plus individual keys only if enabled. Imposes crawler load, scans in the crawler's order (a partial scan is biased) unless `uniform` is set, which reads the whole dump and returns estimates from a random sample (a full crawl, capped at 2 million items or 60 s), and needs the LRU crawler enabled (off by default on 1.4).",
         annotations(read_only_hint = true)
     )]
     async fn sample_keys(
@@ -516,8 +522,9 @@ impl MemcachedServer {
         let scan = a.max_scan.unwrap_or(DEFAULT_SCAN).clamp(1, MAX_SCAN);
         let max_keys = a.max_keys.unwrap_or(50).min(500);
 
+        let uniform = a.uniform.unwrap_or(false);
         let c = self.connect(&who, &a.addr).await?;
-        let sample = c.dump_keys(scan).await.map_err(|e| {
+        let explain = |e: memcached_core::ClientError| {
             let msg = e.to_string();
             if msg.contains("disabled") {
                 "the LRU crawler is disabled on this server; start memcached with `-o lru_crawler` to allow metadump".to_owned()
@@ -526,26 +533,45 @@ impl MemcachedServer {
             } else {
                 msg
             }
-        })?;
+        };
+        // `seen` is how many items the server listed; the entries are all of them, or a uniform
+        // random subset when `uniform` is set.
+        let (sample, seen) = if uniform {
+            let u = c
+                .sample_keys_uniform(scan, UNIFORM_MAX_READ, UNIFORM_DEADLINE)
+                .await
+                .map_err(explain)?;
+            let seen = u.seen as usize;
+            (
+                memcached_core::KeySample {
+                    entries: u.entries,
+                    complete: u.complete,
+                },
+                seen,
+            )
+        } else {
+            let s = c.dump_keys(scan).await.map_err(explain)?;
+            let seen = s.entries.len();
+            (s, seen)
+        };
         self.audit.record(
             &who.name,
             "sample_keys",
             &a.addr,
             None,
             &format!(
-                "scanned={} complete={} names_returned={want_keys}",
-                sample.entries.len(),
+                "scanned={seen} complete={} uniform={uniform} names_returned={want_keys}",
                 sample.complete
             ),
         );
 
-        let scanned = sample.entries.len();
+        let scanned = seen;
         let kept: Vec<_> = sample
             .entries
             .iter()
             .filter(|e| a.prefix.as_deref().is_none_or(|p| e.key.starts_with(p)))
             .collect();
-        let prefixes = diagnostics::inventory::summarize(
+        let mut prefixes = diagnostics::inventory::summarize(
             kept.iter().map(|e| diagnostics::inventory::Item {
                 key: &e.key,
                 size: e.size,
@@ -553,7 +579,19 @@ impl MemcachedServer {
             }),
             delim,
         );
-        let never_fetched = kept.iter().filter(|e| !e.fetched).count();
+        // A complete uniform sample stands in for `seen` items: scale its totals up to estimates.
+        let estimated = uniform && sample.complete && !sample.entries.is_empty();
+        let factor = if estimated {
+            seen as f64 / sample.entries.len() as f64
+        } else {
+            1.0
+        };
+        if estimated {
+            diagnostics::inventory::scale(&mut prefixes, factor);
+        }
+        let never_fetched =
+            (kept.iter().filter(|e| !e.fetched).count() as f64 * factor).round() as u64;
+        let matched = (kept.len() as f64 * factor).round() as u64;
         let keys: Vec<_> = if want_keys {
             kept.iter()
                 .take(max_keys)
@@ -571,7 +609,16 @@ impl MemcachedServer {
             "size is the item's total size including overhead, not the value length".to_owned(),
             "expires_at and last_access are unix times on the server's clock; last_access is updated lazily".to_owned(),
         ];
-        if !sample.complete {
+        if estimated {
+            notes.push(format!(
+                "estimates: totals come from a uniform random sample of {} of {seen} items, scaled up; small prefixes carry a large error",
+                sample.entries.len()
+            ));
+        } else if uniform && !sample.complete {
+            notes.push(format!(
+                "the full scan was cut off after {seen} items (item or time limit), so this sample is only of the crawler's first items, not random across the cache"
+            ));
+        } else if !sample.complete {
             notes.push(format!(
                 "scan stopped after {scanned} items before reaching the end; the crawler does not visit items randomly, so these totals are not representative of the whole cache"
             ));
@@ -579,7 +626,8 @@ impl MemcachedServer {
         serde_json::to_string_pretty(&serde_json::json!({
             "scanned": scanned,
             "complete": sample.complete,
-            "matched": kept.len(),
+            "estimated": estimated,
+            "matched": matched,
             "never_fetched": never_fetched,
             "prefixes": prefixes.iter().take(50).collect::<Vec<_>>(),
             "keys": keys,

@@ -58,6 +58,27 @@ pub struct KeySample {
     pub complete: bool,
 }
 
+/// Result of [`Client::sample_keys_uniform`].
+#[derive(Debug, Clone)]
+pub struct UniformSample {
+    /// At most the requested number of entries, each item equally likely to be among them.
+    pub entries: Vec<DumpEntry>,
+    /// How many items the server listed before the scan ended.
+    pub seen: u64,
+    /// True only if the server's `END` was seen, so `seen` is the whole cache and the sample is
+    /// unbiased. A capped or timed-out scan is a sample of the crawler's prefix only.
+    pub complete: bool,
+}
+
+/// splitmix64: small, fast and good enough to pick sample slots. Not for anything secret.
+fn next_random(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 pub struct Client {
     io: BufReader<TcpStream>,
     op_timeout: Duration,
@@ -229,6 +250,55 @@ impl Client {
                     if entries.len() >= max_entries {
                         return Ok(KeySample {
                             entries,
+                            complete: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads the whole metadump and keeps a uniform random sample of `keep` entries (reservoir
+    /// sampling), so totals scaled by `seen / entries.len()` are unbiased. Costs a full crawl:
+    /// stops at `max_read` items or after `deadline`, and then reports `complete: false`.
+    pub async fn sample_keys_uniform(
+        mut self,
+        keep: usize,
+        max_read: u64,
+        deadline: Duration,
+    ) -> Result<UniformSample, ClientError> {
+        self.send(&text::encode_metadump()).await?;
+        let started = tokio::time::Instant::now();
+        let mut rng = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64);
+        let mut entries: Vec<DumpEntry> = Vec::with_capacity(keep.min(1 << 16));
+        let mut seen = 0u64;
+        loop {
+            match text::parse_dump_line(&self.line().await?)? {
+                DumpLine::Ok => {}
+                DumpLine::End => {
+                    return Ok(UniformSample {
+                        entries,
+                        seen,
+                        complete: true,
+                    })
+                }
+                DumpLine::Entry(e) => {
+                    seen += 1;
+                    if entries.len() < keep {
+                        entries.push(e);
+                    } else {
+                        // Algorithm R: item number `seen` replaces a random slot with p = keep/seen.
+                        let j = next_random(&mut rng) % seen;
+                        if (j as usize) < keep {
+                            entries[j as usize] = e;
+                        }
+                    }
+                    if seen >= max_read || started.elapsed() >= deadline {
+                        return Ok(UniformSample {
+                            entries,
+                            seen,
                             complete: false,
                         });
                     }

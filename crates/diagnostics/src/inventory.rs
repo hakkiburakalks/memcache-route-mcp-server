@@ -59,9 +59,32 @@ pub fn summarize<'a>(items: impl IntoIterator<Item = Item<'a>>, delim: char) -> 
     out
 }
 
+/// Multiplies every count by `factor`, to turn totals from a uniform sample into estimates for
+/// the whole cache.
+pub fn scale(stats: &mut [PrefixStat], factor: f64) {
+    let up = |n: u64| (n as f64 * factor).round() as u64;
+    for s in stats {
+        s.items = up(s.items);
+        s.bytes = up(s.bytes);
+        s.never_fetched = up(s.never_fetched);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_multiplies_and_rounds() {
+        let mut s = vec![PrefixStat {
+            prefix: "a".into(),
+            items: 3,
+            bytes: 10,
+            never_fetched: 1,
+        }];
+        scale(&mut s, 2.5);
+        assert_eq!((s[0].items, s[0].bytes, s[0].never_fetched), (8, 25, 3));
+    }
 
     fn item(key: &str, size: u64, fetched: bool) -> Item<'_> {
         Item { key, size, fetched }

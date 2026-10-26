@@ -609,6 +609,38 @@ async fn key_sampling_is_opt_in_and_private_by_default() {
         "key names must not leak without MEMCACHED_MCP_ALLOW_KEY_NAMES"
     );
 
+    // Uniform mode reads the whole dump. With room for every item the numbers are exact...
+    let (err, text) = w
+        .call(
+            "sample_keys",
+            json!({"addr":addr,"prefix":"inv-","uniform":true,"max_scan":100000}),
+        )
+        .await;
+    assert!(!err, "{text}");
+    let r: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["estimated"], json!(true));
+    assert_eq!(
+        (r["matched"].clone(), r["prefixes"][0]["items"].clone()),
+        (json!(9), json!(6))
+    );
+    // ...and with a sample smaller than the cache it still scans everything and says it estimates.
+    let (err, text) = w
+        .call(
+            "sample_keys",
+            json!({"addr":addr,"uniform":true,"max_scan":3}),
+        )
+        .await;
+    assert!(!err, "{text}");
+    let r: Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        r["scanned"].as_u64().unwrap() >= 9 && r["complete"] == json!(true),
+        "{text}"
+    );
+    assert!(
+        text.contains("estimates:") && !text.contains("inv-a:0"),
+        "{text}"
+    );
+
     let (err, text) = w
         .call(
             "sample_keys",
