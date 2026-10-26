@@ -109,6 +109,12 @@ jobs:
           out=$(helm template t deploy/helm/memcached-mcp -n prod --set 'allowlist={a:11211}' --set auth.existingSecret=s --set 'allowedHosts={mcp.example.com}')
           echo "$out" | grep -A1 MEMCACHED_MCP_HTTP_ALLOWED_HOSTS
           echo "$out" | grep -q 'value: "t-memcached-mcp,t-memcached-mcp.prod,t-memcached-mcp.prod.svc,t-memcached-mcp.prod.svc.cluster.local,mcp.example.com"'
+      - name: NetworkPolicy is off by default and refuses an empty peer list
+        run: |
+          base="deploy/helm/memcached-mcp --set allowlist={a:11211} --set auth.existingSecret=s"
+          ! helm template t $base | grep -q NetworkPolicy
+          ! helm template t $base --set networkPolicy.enabled=true
+          helm template t $base --set networkPolicy.enabled=true --set 'networkPolicy.allowFrom[0].podSelector.matchLabels.app=prom' | grep -A12 'kind: NetworkPolicy'
 
   audit:
     runs-on: ubuntu-latest

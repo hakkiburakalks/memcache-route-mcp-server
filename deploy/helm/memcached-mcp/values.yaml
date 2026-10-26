@@ -49,3 +49,9 @@ resources: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Restrict who can reach the pod (needs a CNI that enforces NetworkPolicy). Each entry is a
+# NetworkPolicy peer, e.g. [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}].
+networkPolicy:
+  enabled: false
+  allowFrom: []
