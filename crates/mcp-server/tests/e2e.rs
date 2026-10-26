@@ -158,6 +158,63 @@ async fn stdio_is_read_only_and_allowlisted_by_default() {
     assert!(err && text.contains("ALLOWLIST"), "{text}");
 }
 
+/// Read access must not become write access through a tool argument that is spliced into a
+/// memcached command line.
+#[tokio::test]
+async fn read_tools_cannot_smuggle_commands() {
+    let Some(addr) = memcached_addr() else { return };
+    let mut w = Stdio_::start(&[
+        ("MEMCACHED_MCP_ALLOWLIST", &addr),
+        ("MEMCACHED_MCP_ALLOW_WRITE", "1"),
+    ])
+    .await;
+    let (err, text) = w
+        .call(
+            "set_key",
+            json!({"addr":addr,"key":"e2e:inject","value":"v","ttl_seconds":60}),
+        )
+        .await;
+    assert!(!err, "{text}");
+
+    let mut r = Stdio_::start(&[("MEMCACHED_MCP_ALLOWLIST", &addr)]).await;
+    for group in [
+        "settings\r\ndelete e2e:inject",
+        "settings\ndelete e2e:inject",
+        "items delete e2e:inject",
+    ] {
+        let (err, text) = r
+            .call("get_stats", json!({"addr":addr,"group":group}))
+            .await;
+        assert!(err && text.contains("stats group"), "{group:?}: {text}");
+    }
+    // Keys carry the same risk.
+    let (err, _) = r
+        .call(
+            "get_key_metadata",
+            json!({"addr":addr,"key":"x\r\ndelete e2e:inject"}),
+        )
+        .await;
+    assert!(err);
+
+    let (_, text) = r
+        .call("get_key_metadata", json!({"addr":addr,"key":"e2e:inject"}))
+        .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["found"],
+        json!(true),
+        "the key must have survived"
+    );
+
+    let many: Vec<_> = (0..33).map(|_| addr.clone()).collect();
+    let (err, text) = r.call("compare_nodes", json!({"addrs":many})).await;
+    assert!(err && text.contains("at most"), "{text}");
+
+    let (err, _) = w
+        .call("delete_key", json!({"addr":addr,"key":"e2e:inject"}))
+        .await;
+    assert!(!err);
+}
+
 #[tokio::test]
 async fn stdio_writes_are_gated_prefixed_and_audited() {
     let Some(addr) = memcached_addr() else { return };

@@ -10,6 +10,13 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+/// Longest single response line accepted (metadump lines are about 1 KiB at most).
+const MAX_LINE_BYTES: u64 = 16 * 1024;
+/// Largest value read back; memcached's default item limit is 1 MiB, mcrouter's config is smaller.
+const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
+/// More `STAT` lines than any real server sends.
+const MAX_STAT_LINES: usize = 100_000;
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("io: {0}")]
@@ -77,11 +84,17 @@ impl Client {
 
     async fn line(&mut self) -> Result<String, ClientError> {
         let mut buf = String::new();
-        let n = timeout(self.op_timeout, self.io.read_line(&mut buf))
-            .await
-            .map_err(|_| ClientError::Timeout)??;
+        let n = timeout(
+            self.op_timeout,
+            (&mut self.io).take(MAX_LINE_BYTES).read_line(&mut buf),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout)??;
         if n == 0 {
             return Err(ClientError::Closed);
+        }
+        if !buf.ends_with('\n') && n as u64 >= MAX_LINE_BYTES {
+            return Err(ProtocolError::Malformed("response line too long".to_owned()).into());
         }
         Ok(buf)
     }
@@ -99,10 +112,15 @@ impl Client {
         &mut self,
         arg: Option<&str>,
     ) -> Result<BTreeMap<String, String>, ClientError> {
-        self.send(&text::encode_stats(arg)).await?;
+        self.send(&text::encode_stats(arg)?).await?;
         let mut out = BTreeMap::new();
+        let mut lines = 0usize;
         loop {
             let l = self.line().await?;
+            lines += 1;
+            if lines > MAX_STAT_LINES {
+                return Err(ProtocolError::Malformed("too many stat lines".to_owned()).into());
+            }
             match text::parse_stat_line(&l)? {
                 Some((k, v)) => {
                     out.insert(k.to_owned(), v.to_owned());
@@ -117,6 +135,14 @@ impl Client {
         self.send(&text::encode_get(&[key])?).await?;
         let mut found = None;
         while let Some(h) = text::parse_value_header(&self.line().await?)? {
+            // The length comes from the server; never let it decide how much memory we allocate.
+            if h.len > MAX_VALUE_BYTES {
+                return Err(ProtocolError::Malformed(format!(
+                    "value of {} bytes exceeds the {MAX_VALUE_BYTES} byte limit",
+                    h.len
+                ))
+                .into());
+            }
             let mut data = vec![0u8; h.len + 2];
             timeout(self.op_timeout, self.io.read_exact(&mut data))
                 .await

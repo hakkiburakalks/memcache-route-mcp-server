@@ -37,10 +37,22 @@ pub fn encode_get(keys: &[&[u8]]) -> Result<Vec<u8>, ProtocolError> {
     Ok(out)
 }
 
-pub fn encode_stats(arg: Option<&str>) -> Vec<u8> {
+/// The group is spliced into the command line, so anything but a plain word is refused: a CR/LF
+/// in it would let the caller send a second, arbitrary command.
+pub fn encode_stats(arg: Option<&str>) -> Result<Vec<u8>, ProtocolError> {
     match arg {
-        Some(a) => format!("stats {a}\r\n").into_bytes(),
-        None => b"stats\r\n".to_vec(),
+        Some(a) => {
+            if a.is_empty()
+                || a.len() > 32
+                || !a.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(ProtocolError::InvalidKey(
+                    "stats group must be 1-32 letters, digits or underscores",
+                ));
+            }
+            Ok(format!("stats {a}\r\n").into_bytes())
+        }
+        None => Ok(b"stats\r\n".to_vec()),
     }
 }
 
@@ -367,6 +379,26 @@ mod tests {
     #[test]
     fn encodes_multi_get() {
         assert_eq!(encode_get(&[b"a", b"b"]).unwrap(), b"get a b\r\n");
+    }
+
+    #[test]
+    fn stats_group_cannot_smuggle_a_second_command() {
+        assert_eq!(encode_stats(None).unwrap(), b"stats\r\n");
+        assert_eq!(encode_stats(Some("items")).unwrap(), b"stats items\r\n");
+        let too_long = "a".repeat(33);
+        for bad in [
+            "settings\r\nflush_all",
+            "settings\nflush_all",
+            "a b",
+            "",
+            "x\0",
+            too_long.as_str(),
+        ] {
+            assert!(
+                encode_stats(Some(bad)).is_err(),
+                "{bad:?} should be refused"
+            );
+        }
     }
 
     #[test]

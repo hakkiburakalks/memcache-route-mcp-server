@@ -24,6 +24,9 @@ const OP_TIMEOUT: Duration = Duration::from_secs(3);
 /// Largest value memcached accepts by default (1 MiB item size limit).
 const MAX_VALUE_BYTES: usize = 1024 * 1024;
 
+/// Nodes are contacted one after another, each with its own timeout, so the list is bounded.
+const MAX_COMPARE_NODES: usize = 32;
+
 #[derive(Clone)]
 struct MemcachedServer {
     allowlist: HashSet<String>,
@@ -254,6 +257,12 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "compare_nodes", &a.addrs.join(","))?;
+        if a.addrs.len() > MAX_COMPARE_NODES {
+            return Err(format!(
+                "compare_nodes takes at most {MAX_COMPARE_NODES} addresses, got {}",
+                a.addrs.len()
+            ));
+        }
         let mut collected = Vec::new();
         let mut unreachable = Vec::new();
         for addr in &a.addrs {
