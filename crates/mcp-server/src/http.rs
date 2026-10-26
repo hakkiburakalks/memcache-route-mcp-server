@@ -19,7 +19,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServerHandler;
 
-use crate::audit::Audit;
+use crate::audit::{Admit, Audit, Throttle};
 use crate::auth::{Identity, Perm, TokenStore};
 
 /// Shorter tokens are refused at startup.
@@ -150,7 +150,12 @@ async fn require_known_host(
 struct Auth {
     tokens: Arc<TokenStore>,
     audit: Arc<Audit>,
+    /// Bad-token attempts come from anyone who can reach the port, so their audit lines are capped.
+    denials: Arc<Throttle>,
 }
+
+/// Audit lines for failed authentication per second, before the rest are only counted.
+const MAX_DENIAL_LOGS_PER_SEC: u32 = 20;
 
 async fn require_token(
     State(auth): State<Auth>,
@@ -166,13 +171,25 @@ async fn require_token(
         req.extensions_mut().insert(identity);
         return next.run(req).await;
     }
-    auth.audit.record(
-        "-",
-        "http",
-        &peer.to_string(),
-        None,
-        "denied: missing, wrong or expired bearer token",
-    );
+    let admit = auth.denials.admit();
+    if let Admit::AfterDropped(n) = admit {
+        auth.audit.record(
+            "-",
+            "http",
+            "-",
+            None,
+            &format!("{n} more failed authentications in the previous second were not logged"),
+        );
+    }
+    if admit != Admit::No {
+        auth.audit.record(
+            "-",
+            "http",
+            &peer.to_string(),
+            None,
+            "denied: missing, wrong or expired bearer token",
+        );
+    }
     (
         StatusCode::UNAUTHORIZED,
         [(WWW_AUTHENTICATE, "Bearer")],
@@ -196,6 +213,7 @@ where
     let auth = Auth {
         tokens: Arc::new(cfg.tokens),
         audit,
+        denials: Arc::new(Throttle::new(MAX_DENIAL_LOGS_PER_SEC)),
     };
     let mut app = Router::new().nest_service("/mcp", mcp);
     if !cfg.metrics.memcached.is_empty() || !cfg.metrics.mcrouter.is_empty() {

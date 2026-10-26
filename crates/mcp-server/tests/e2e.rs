@@ -903,6 +903,44 @@ async fn http_users_get_only_their_permissions() {
     }
 }
 
+/// A flood of bad tokens must not turn into a flood of audit lines.
+#[tokio::test]
+async fn failed_logins_do_not_flood_the_audit_log() {
+    let dir = std::env::temp_dir().join(format!("memcached-mcp-flood-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit = dir.join("audit.log");
+    let _ = std::fs::remove_file(&audit);
+    let mut child = command(
+        &[
+            ("MEMCACHED_MCP_HTTP_TOKEN", TOKEN),
+            ("MEMCACHED_MCP_AUDIT_LOG", audit.to_str().unwrap()),
+        ],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+    let started = std::time::Instant::now();
+    for i in 0..200 {
+        assert_eq!(
+            http_post(port, &format!("wrong-{i}"), None, &json!({}))
+                .await
+                .0,
+            401
+        );
+    }
+    let seconds = started.elapsed().as_secs() + 2;
+    let lines = std::fs::read_to_string(&audit).unwrap().lines().count();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(lines >= 1, "denials must still be recorded");
+    // At most 20 per second, plus one summary line per second.
+    assert!(
+        lines as u64 <= 21 * seconds,
+        "{lines} audit lines for 200 failures over ~{seconds}s"
+    );
+    assert!(lines < 200, "{lines} audit lines: the cap did nothing");
+}
+
 /// Needs no memcached: only the authentication layer is exercised.
 #[tokio::test]
 async fn expired_tokens_are_refused() {

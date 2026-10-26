@@ -49,6 +49,7 @@ The endpoint is `/mcp`. Clients must send `Authorization: Bearer <token>`; reque
 - The token is mandatory; the server refuses to start without one of at least 24 characters.
 - There is no TLS. Binding to anything other than loopback is refused unless `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`, because the token would cross the network in clear text. Put a TLS-terminating proxy in front and bind to loopback.
 - `Host` headers are checked against loopback names on every route (including `/metrics`) to block DNS rebinding. Behind a proxy, list the public hostnames in `MEMCACHED_MCP_HTTP_ALLOWED_HOSTS` (comma-separated).
+- Failed logins are written to the audit log, at most 20 lines per second; the rest are summarised in one line, so a flood of bad tokens cannot fill the disk.
 - A single shared token means one identity with full access. For per-user access see below.
 
 ### Per-user tokens and permissions
