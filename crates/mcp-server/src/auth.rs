@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -107,6 +108,9 @@ struct FileUser {
     name: String,
     token_sha256: String,
     permissions: Vec<String>,
+    /// Unix time (seconds) from which the token stops working; absent means it never expires.
+    #[serde(default)]
+    expires_at: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -114,15 +118,31 @@ struct FileFormat {
     users: Vec<FileUser>,
 }
 
+struct Entry {
+    hash: String, // sha256 hex of the token
+    identity: Identity,
+    expires_at: Option<u64>,
+}
+
 pub struct TokenStore {
-    users: Vec<(String, Identity)>, // (sha256 hex of the token, identity)
+    users: Vec<Entry>,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl TokenStore {
     /// One shared token that grants everything: the pre-RBAC behaviour.
     pub fn shared(token: &str) -> Self {
         Self {
-            users: vec![(sha256_hex(token), Identity::all("shared-token"))],
+            users: vec![Entry {
+                hash: sha256_hex(token),
+                identity: Identity::all("shared-token"),
+                expires_at: None,
+            }],
         }
     }
 
@@ -166,7 +186,14 @@ impl TokenStore {
                     .ok_or_else(|| format!("user '{}': unknown permission '{p}'", u.name))?;
                 id.perms |= perm.bit();
             }
-            users.push((hash, id));
+            if u.expires_at == Some(0) {
+                return Err(format!("user '{}': expires_at must be a unix time", u.name));
+            }
+            users.push(Entry {
+                hash,
+                identity: id,
+                expires_at: u.expires_at,
+            });
         }
         Ok(Self { users })
     }
@@ -174,14 +201,30 @@ impl TokenStore {
     /// Checks every entry rather than stopping at the first match, so timing does not reveal
     /// which user (or how many) a wrong token was close to.
     pub fn lookup(&self, presented: &str) -> Option<Identity> {
+        self.lookup_at(presented, now_secs())
+    }
+
+    /// Like [`lookup`](Self::lookup) with the clock passed in. An expired token is treated
+    /// exactly like an unknown one.
+    fn lookup_at(&self, presented: &str, now: u64) -> Option<Identity> {
         let digest = sha256_hex(presented);
         let mut found = None;
-        for (hash, id) in &self.users {
-            if ct_eq(hash.as_bytes(), digest.as_bytes()) {
-                found = Some(id.clone());
+        for e in &self.users {
+            if ct_eq(e.hash.as_bytes(), digest.as_bytes()) && e.expires_at.is_none_or(|t| now < t) {
+                found = Some(e.identity.clone());
             }
         }
         found
+    }
+
+    /// Names of users whose token has already expired, for a startup warning.
+    pub fn expired(&self) -> Vec<&str> {
+        let now = now_secs();
+        self.users
+            .iter()
+            .filter(|e| e.expires_at.is_some_and(|t| now >= t))
+            .map(|e| &*e.identity.name)
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -288,6 +331,31 @@ mod tests {
         ));
         let z = TokenStore::from_json(&upper).unwrap().lookup("t").unwrap();
         assert!(!z.can(Perm::Read));
+    }
+
+    #[test]
+    fn expired_tokens_stop_working() {
+        let json = file(&format!(
+            r#"{{"name":"temp","token_sha256":"{}","permissions":["read"],"expires_at":1000}},{}"#,
+            sha256_hex("tok-temp"),
+            user("perm", "tok-perm", r#""read""#)
+        ));
+        let store = TokenStore::from_json(&json).unwrap();
+        assert!(store.lookup_at("tok-temp", 999).is_some());
+        assert!(store.lookup_at("tok-temp", 1000).is_none());
+        assert!(store.lookup_at("tok-temp", 5000).is_none());
+        assert!(store.lookup_at("tok-perm", u64::MAX).is_some());
+        // 1000 is long past, so the real clock agrees.
+        assert!(store.lookup("tok-temp").is_none());
+        assert_eq!(store.expired(), vec!["temp"]);
+        let zero = file(&format!(
+            r#"{{"name":"z","token_sha256":"{}","permissions":[],"expires_at":0}}"#,
+            sha256_hex("t")
+        ));
+        assert!(TokenStore::from_json(&zero)
+            .err()
+            .unwrap()
+            .contains("expires_at"));
     }
 
     #[test]

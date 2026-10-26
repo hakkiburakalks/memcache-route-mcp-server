@@ -903,6 +903,76 @@ async fn http_users_get_only_their_permissions() {
     }
 }
 
+/// Needs no memcached: only the authentication layer is exercised.
+#[tokio::test]
+async fn expired_tokens_are_refused() {
+    let dir = std::env::temp_dir().join(format!("memcached-mcp-expiry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tokens = dir.join("tokens.json");
+
+    let issue = |name: &'static str, extra: &'static [&'static str]| async move {
+        let mut args = vec!["new-token", name, "read"];
+        args.extend_from_slice(extra);
+        let out = command(&[], &args).output().await.unwrap();
+        (
+            out.status.success(),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let parse = |text: &str| -> (String, Value) {
+        let token = text
+            .lines()
+            .next()
+            .unwrap()
+            .rsplit(": ")
+            .next()
+            .unwrap()
+            .to_owned();
+        let json = text.split_once('\n').unwrap().1;
+        (
+            token,
+            serde_json::from_str(&json[json.find('{').unwrap()..]).unwrap(),
+        )
+    };
+
+    let (ok, text, _) = issue("fresh", &["7"]).await;
+    assert!(ok);
+    let (fresh_token, fresh) = parse(&text);
+    let expires = fresh["expires_at"].as_u64().expect("expires_at is set");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        (now + 7 * 86_400 - 5..=now + 7 * 86_400 + 5).contains(&expires),
+        "{expires} vs {now}"
+    );
+    // Without DAYS the token never expires; bad DAYS is rejected when issuing.
+    let (ok, text, _) = issue("forever", &[]).await;
+    assert!(ok && parse(&text).1.get("expires_at").is_none());
+    for bad in ["0", "x", "-1", "99999"] {
+        let args: &'static [&'static str] = Box::leak(Box::new([bad]));
+        let (ok, _, err) = issue("bad", args).await;
+        assert!(!ok && err.contains("DAYS"), "{bad}: {err}");
+    }
+
+    // The same token with its deadline moved into the past stops working.
+    let (old_token, mut old) = parse(&issue("old", &["1"]).await.1);
+    old["expires_at"] = json!(now - 60);
+    std::fs::write(&tokens, json!({"users": [fresh, old]}).to_string()).unwrap();
+    let mut child = command(
+        &[("MEMCACHED_MCP_HTTP_TOKEN_FILE", tokens.to_str().unwrap())],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+    assert_eq!(http_post(port, &old_token, None, &json!({})).await.0, 401);
+    assert_ne!(http_post(port, &fresh_token, None, &json!({})).await.0, 401);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn http_refuses_ambiguous_or_broken_auth_config() {
     let dir = std::env::temp_dir().join(format!("memcached-mcp-authcfg-{}", std::process::id()));

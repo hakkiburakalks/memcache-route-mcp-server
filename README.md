@@ -56,14 +56,17 @@ The endpoint is `/mcp`. Clients must send `Authorization: Bearer <token>`; reque
 Instead of `MEMCACHED_MCP_HTTP_TOKEN`, point `MEMCACHED_MCP_HTTP_TOKEN_FILE` at a JSON file of users (set one of the two, not both). Only SHA-256 hashes of the tokens are stored. Issue a token with:
 
 ```
-memcached-mcp new-token alice read,metrics
+memcached-mcp new-token alice read,metrics        # never expires
+memcached-mcp new-token alice read,metrics 30     # stops working after 30 days
 ```
 
 It prints the token once (give it to Alice) and the entry to add to the file:
 
 ```json
-{"users": [{"name": "alice", "token_sha256": "...", "permissions": ["read", "metrics"]}]}
+{"users": [{"name": "alice", "token_sha256": "...", "permissions": ["read", "metrics"], "expires_at": 1795000000}]}
 ```
+
+`expires_at` is optional, in unix seconds. From that moment the token is refused exactly like an unknown one (401, audited), and the server warns at startup about users whose token has already expired. To rotate, issue a new token, replace the user's entry and restart.
 
 | Permission | Allows |
 | --- | --- |
@@ -73,7 +76,7 @@ It prints the token once (give it to Alice) and the entry to add to the file:
 | `write` | `set_key`, `delete_key`, `touch_key` |
 | `metrics` | `/metrics` |
 
-A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is read at startup; restart to change users. Tokens are 256 random bits, so a fast hash is enough. There is no token expiry or rotation tooling.
+A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is read at startup; restart to change users. Tokens are 256 random bits, so a fast hash is enough. Rotation is manual: there is no revocation without editing the file and restarting.
 
 ### Prometheus metrics
 

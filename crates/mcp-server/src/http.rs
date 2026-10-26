@@ -171,7 +171,7 @@ async fn require_token(
         "http",
         &peer.to_string(),
         None,
-        "denied: missing or wrong bearer token",
+        "denied: missing, wrong or expired bearer token",
     );
     (
         StatusCode::UNAUTHORIZED,

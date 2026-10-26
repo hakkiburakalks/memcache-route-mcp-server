@@ -797,18 +797,44 @@ fn token_store() -> Result<auth::TokenStore, String> {
                 .map_err(|e| format!("cannot read MEMCACHED_MCP_HTTP_TOKEN_FILE '{file}': {e}"))?;
             let store = auth::TokenStore::from_json(&json)?;
             eprintln!("auth: {} user(s) loaded from {file}", store.len());
+            let expired = store.expired();
+            if !expired.is_empty() {
+                eprintln!(
+                    "warning: token expired for {}; those users are refused until the file is updated",
+                    expired.join(", ")
+                );
+            }
             Ok(store)
         }
     }
 }
 
-/// `memcached-mcp new-token NAME perm[,perm...]`: prints a fresh token once, plus the entry to
-/// add to the token file. Only the hash is meant to be stored.
+/// `memcached-mcp new-token NAME perm[,perm...] [DAYS]`: prints a fresh token once, plus the
+/// entry to add to the token file. Only the hash is meant to be stored. With DAYS the entry
+/// carries an `expires_at` that many days from now.
 fn new_token_command() -> Result<(), String> {
     let mut args = std::env::args().skip(2);
-    let usage = "usage: memcached-mcp new-token NAME PERMS   (PERMS: comma-separated from read,sample,key_names,write,metrics)";
+    let usage = "usage: memcached-mcp new-token NAME PERMS [DAYS]   (PERMS: comma-separated from read,sample,key_names,write,metrics; DAYS: lifetime, default never expires)";
     let name = args.next().ok_or(usage)?;
     let perms = args.next().ok_or(usage)?;
+    let expires_at = match args.next() {
+        None => None,
+        Some(d) => {
+            let days: u64 = d
+                .parse()
+                .ok()
+                .filter(|d| (1..=3650).contains(d))
+                .ok_or("DAYS must be a whole number between 1 and 3650")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            Some(now + days * 86_400)
+        }
+    };
+    if args.next().is_some() {
+        return Err(usage.to_owned());
+    }
     let perms: Vec<&str> = perms
         .split(',')
         .map(str::trim)
@@ -822,11 +848,14 @@ fn new_token_command() -> Result<(), String> {
     // Reuse the file validator so a typo is caught here, not at server start.
     auth::TokenStore::from_json(&format!("{{\"users\":[{entry}]}}"))?;
     let token = auth::new_token().map_err(|e| format!("no randomness available: {e}"))?;
-    let entry = serde_json::json!({
+    let mut entry = serde_json::json!({
         "name": name,
         "token_sha256": auth::sha256_hex(&token),
         "permissions": perms,
     });
+    if let Some(t) = expires_at {
+        entry["expires_at"] = t.into();
+    }
     println!("token (shown once, give it to {name}): {token}");
     println!("add to the token file's \"users\" list:");
     println!(
