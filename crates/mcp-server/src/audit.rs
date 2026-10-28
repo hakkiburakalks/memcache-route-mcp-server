@@ -5,11 +5,14 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Audit {
     file: Option<Mutex<File>>,
+    /// Lines that could not be written to the log file.
+    failed: AtomicU64,
 }
 
 impl Audit {
@@ -20,7 +23,10 @@ impl Audit {
             )),
             _ => None,
         };
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            failed: AtomicU64::new(0),
+        })
     }
 
     /// `user` is the authenticated identity: a token-file name, `shared-token`, `stdio`, or `-`
@@ -37,8 +43,15 @@ impl Audit {
         line.push('\n');
         match &self.file {
             Some(f) => {
-                if let Ok(mut f) = f.lock() {
-                    let _ = f.write_all(line.as_bytes());
+                // A poisoned lock still guards a usable file.
+                let mut f = f.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(e) = f.write_all(line.as_bytes()) {
+                    // The audit trail is lost for this line; say so on stderr (at the 1st, 2nd,
+                    // 4th, ... failure so a full disk does not flood it), with the line itself.
+                    let n = self.failed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n.is_power_of_two() {
+                        eprintln!("audit: cannot write to the audit log ({e}); {n} line(s) lost so far; this one: {}", line.trim_end());
+                    }
                 }
             }
             None => {

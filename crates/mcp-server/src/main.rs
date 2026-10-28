@@ -197,7 +197,7 @@ impl MemcachedServer {
     }
 
     #[tool(
-        description = "Check whether a key exists and return its metadata; the value itself is never returned. On servers with meta commands (1.6+) this also reports remaining TTL, seconds since last access, whether it was fetched before, and CAS; older servers report only flags and size. Does not change the item's LRU position or fetched-before state, but the lookup still counts in the server's get_hits/get_misses totals.",
+        description = "Check whether a key exists and return its metadata; the value itself is never returned. On servers with meta commands (1.6+) this also reports remaining TTL, seconds since last access, whether it was fetched before, and CAS; older servers report only flags and size. With meta commands this does not change the item's LRU position or fetched-before state; on older servers (source classic) the value is fetched internally, never returned, and the item counts as fetched. Either way the lookup counts in the server's get_hits/get_misses totals.",
         annotations(read_only_hint = true)
     )]
     async fn get_key_metadata(
@@ -210,8 +210,18 @@ impl MemcachedServer {
         let mut c = self.connect(&who, &a.addr).await?;
         let caps = c.probe().await.map_err(|e| e.to_string())?;
         let key = a.key.as_bytes();
-        let body = if caps.meta {
-            let info = c.meta_info(key).await.map_err(|e| e.to_string())?;
+        // A server that advertises meta commands but answers `mg` unexpectedly (an unknown flag on
+        // an older 1.6) is read the classic way instead of failing.
+        let meta = if caps.meta {
+            match c.meta_info(key).await {
+                Ok(info) => Some(info),
+                Err(memcached_core::ClientError::Protocol(_)) => None,
+                Err(e) => return Err(e.to_string()),
+            }
+        } else {
+            None
+        };
+        let body = if let Some(info) = meta {
             serde_json::json!({ "source": "meta", "found": info.is_some(), "info": info })
         } else {
             let hit = c.get(key).await.map_err(|e| e.to_string())?;
@@ -330,7 +340,7 @@ impl MemcachedServer {
     }
 
     #[tool(
-        description = "Inspect and compare the memcached servers behind an mcrouter: reads the mcrouter's pools, then looks at each destination's own stats and flags outliers and per-node problems. mcrouter names destinations as it sees them, so MEMCACHED_MCP_DEST_MAP must map those names to reachable addresses (which must also be allowlisted); unmapped or unreachable destinations are reported, not guessed.",
+        description = "Inspect and compare the memcached servers behind an mcrouter: reads the mcrouter's pools, then looks at each destination's own stats and flags outliers (within each pool, under comparison, keyed by pool name) and per-node problems. mcrouter names destinations as it sees them, so MEMCACHED_MCP_DEST_MAP must map those names to reachable addresses (which must also be allowlisted); unmapped or unreachable destinations are reported, not guessed.",
         annotations(read_only_hint = true)
     )]
     async fn mcrouter_compare_destinations(
@@ -370,11 +380,18 @@ impl MemcachedServer {
             }
         }
 
-        let nodes: Vec<_> = collected
-            .iter()
-            .map(|(name, (stats, _, _))| diagnostics::NodeSummary { name, stats })
-            .collect();
-        let comparison = diagnostics::compare_nodes(&nodes);
+        // Servers of different pools serve different data, so each pool is compared on its own.
+        let mut comparison = BTreeMap::new();
+        for pool in &cfg.pools {
+            let nodes: Vec<_> = collected
+                .iter()
+                .filter(|(name, _)| pool.servers.contains(name))
+                .map(|(name, (stats, _, _))| diagnostics::NodeSummary { name, stats })
+                .collect();
+            if !nodes.is_empty() {
+                comparison.insert(pool.name.clone(), diagnostics::compare_nodes(&nodes));
+            }
+        }
         let per_node: BTreeMap<_, _> = collected
             .iter()
             .map(|(name, (stats, items, settings))| {
