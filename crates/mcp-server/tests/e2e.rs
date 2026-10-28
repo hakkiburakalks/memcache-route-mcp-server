@@ -1043,6 +1043,57 @@ async fn expired_tokens_are_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Needs no memcached. Revoking a token by editing the file takes effect without a restart,
+/// and a broken edit keeps the previous tokens.
+#[tokio::test]
+async fn token_file_is_reloaded_while_running() {
+    let dir = std::env::temp_dir().join(format!("memcached-mcp-reload-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tokens = dir.join("tokens.json");
+    let issue = |name: &'static str| async move {
+        let out = command(&[], &["new-token", name, "read"])
+            .output()
+            .await
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        let token = text
+            .lines()
+            .next()
+            .unwrap()
+            .rsplit(": ")
+            .next()
+            .unwrap()
+            .to_owned();
+        let json = text.split_once('\n').unwrap().1;
+        let entry: Value = serde_json::from_str(&json[json.find('{').unwrap()..]).unwrap();
+        (token, entry)
+    };
+    let (a_token, a) = issue("a").await;
+    let (b_token, b) = issue("b").await;
+    std::fs::write(&tokens, json!({"users": [a]}).to_string()).unwrap();
+    let mut child = command(
+        &[("MEMCACHED_MCP_HTTP_TOKEN_FILE", tokens.to_str().unwrap())],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+    assert_ne!(http_post(port, &a_token, None, &json!({})).await.0, 401);
+    assert_eq!(http_post(port, &b_token, None, &json!({})).await.0, 401);
+
+    // A broken edit changes nothing.
+    std::fs::write(&tokens, "{ not json").unwrap();
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_ne!(http_post(port, &a_token, None, &json!({})).await.0, 401);
+
+    // Replace a with b: a is revoked, b is admitted.
+    std::fs::write(&tokens, json!({"users": [b]}).to_string()).unwrap();
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(http_post(port, &a_token, None, &json!({})).await.0, 401);
+    assert_ne!(http_post(port, &b_token, None, &json!({})).await.0, 401);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn http_refuses_ambiguous_or_broken_auth_config() {
     let dir = std::env::temp_dir().join(format!("memcached-mcp-authcfg-{}", std::process::id()));

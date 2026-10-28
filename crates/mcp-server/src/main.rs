@@ -818,7 +818,7 @@ fn http_bind_from_args() -> Result<Option<std::net::SocketAddr>, String> {
 }
 
 /// Either one shared token (full access) or a file of per-user hashed tokens, never both.
-fn token_store() -> Result<auth::TokenStore, String> {
+fn token_store() -> Result<(auth::TokenStore, Option<String>), String> {
     let shared = std::env::var("MEMCACHED_MCP_HTTP_TOKEN").unwrap_or_default();
     let file = std::env::var("MEMCACHED_MCP_HTTP_TOKEN_FILE").unwrap_or_default();
     match (shared.is_empty(), file.is_empty()) {
@@ -838,7 +838,7 @@ fn token_store() -> Result<auth::TokenStore, String> {
                 ));
             }
             eprintln!("auth: one shared token (full access, no per-user identity)");
-            Ok(auth::TokenStore::shared(&shared))
+            Ok((auth::TokenStore::shared(&shared), None))
         }
         (true, false) => {
             let json = std::fs::read_to_string(&file)
@@ -848,11 +848,11 @@ fn token_store() -> Result<auth::TokenStore, String> {
             let expired = store.expired();
             if !expired.is_empty() {
                 eprintln!(
-                    "warning: token expired for {}; those users are refused until the file is updated",
+                    "warning: token expired for {}; those users are refused until the file is updated (it is re-read every few seconds)",
                     expired.join(", ")
                 );
             }
-            Ok(store)
+            Ok((store, Some(file)))
         }
     }
 }
@@ -920,7 +920,7 @@ fn http_config(
     allowlist: &HashSet<String>,
     dest_map: &BTreeMap<String, String>,
 ) -> Result<http::HttpConfig, String> {
-    let tokens = token_store()?;
+    let (tokens, token_file) = token_store()?;
     if !bind.ip().is_loopback()
         && std::env::var("MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT").as_deref() != Ok("1")
     {
@@ -975,6 +975,7 @@ fn http_config(
     Ok(http::HttpConfig {
         bind,
         tokens,
+        token_file,
         allowed_hosts,
         metrics,
         max_sessions,

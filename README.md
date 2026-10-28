@@ -68,7 +68,7 @@ It prints the token once (give it to Alice) and the entry to add to the file:
 {"users": [{"name": "alice", "token_sha256": "...", "permissions": ["read", "metrics"], "expires_at": 1795000000}]}
 ```
 
-`expires_at` is optional, in unix seconds. From that moment the token is refused exactly like an unknown one (401, audited), and the server warns at startup about users whose token has already expired. To rotate, issue a new token, replace the user's entry and restart.
+`expires_at` is optional, in unix seconds. From that moment the token is refused exactly like an unknown one (401, audited), and the server warns at startup about users whose token has already expired. To rotate, issue a new token, replace the user's entry; no restart is needed (see below).
 
 | Permission | Allows |
 | --- | --- |
@@ -78,7 +78,7 @@ It prints the token once (give it to Alice) and the entry to add to the file:
 | `write` | `set_key`, `delete_key`, `touch_key` |
 | `metrics` | `/metrics` |
 
-A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is read at startup; restart to change users. Tokens are 256 random bits, so a fast hash is enough. Rotation is manual: there is no revocation without editing the file and restarting.
+A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is re-read every 5 seconds while the server runs, so adding, changing or removing a user (revocation) takes effect without a restart, including for open sessions on their next request. If an edit does not parse, the server logs it to the audit log and keeps the previous users. Tokens are 256 random bits, so a fast hash is enough.
 
 ### Prometheus metrics
 

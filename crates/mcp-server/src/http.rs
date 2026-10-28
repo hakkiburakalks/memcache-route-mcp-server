@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -32,6 +32,8 @@ pub const DEFAULT_MAX_SESSIONS: usize = 256;
 pub struct HttpConfig {
     pub bind: SocketAddr,
     pub tokens: TokenStore,
+    /// When set, this file is re-read while running so tokens can be revoked or added without a restart.
+    pub token_file: Option<String>,
     /// Extra `Host` values to accept besides loopback (for use behind a proxy).
     pub allowed_hosts: Vec<String>,
     pub metrics: MetricsTargets,
@@ -241,10 +243,79 @@ async fn cap_sessions(State(cap): State<SessionCap>, req: Request, next: Next) -
 
 #[derive(Clone)]
 struct Auth {
-    tokens: Arc<TokenStore>,
+    tokens: Arc<RwLock<Arc<TokenStore>>>,
     audit: Arc<Audit>,
     /// Bad-token attempts come from anyone who can reach the port, so their audit lines are capped.
     denials: Arc<Throttle>,
+}
+
+impl Auth {
+    fn current_tokens(&self) -> Arc<TokenStore> {
+        // A poisoned lock still holds a complete store: writers only swap the Arc.
+        self.tokens
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+/// How often the token file is checked for changes.
+const TOKEN_RELOAD_EVERY: Duration = Duration::from_secs(5);
+
+/// Re-reads the token file when its contents change. A file that does not parse (or cannot be
+/// read) is reported once and the previous tokens stay in force, so a bad edit never locks
+/// everyone out.
+async fn reload_tokens(file: String, store: Arc<RwLock<Arc<TokenStore>>>, audit: Arc<Audit>) {
+    let mut seen = std::fs::read_to_string(&file).ok();
+    let mut reported_bad = false;
+    loop {
+        tokio::time::sleep(TOKEN_RELOAD_EVERY).await;
+        let Ok(json) = std::fs::read_to_string(&file) else {
+            if !reported_bad {
+                audit.record(
+                    "-",
+                    "http",
+                    "-",
+                    None,
+                    "token file unreadable; keeping the previous tokens",
+                );
+                reported_bad = true;
+            }
+            continue;
+        };
+        if seen.as_deref() == Some(json.as_str()) {
+            continue;
+        }
+        match TokenStore::from_json(&json) {
+            Ok(new) => {
+                let n = new.len();
+                *store.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(new);
+                audit.record(
+                    "-",
+                    "http",
+                    "-",
+                    None,
+                    &format!("token file reloaded: {n} user(s)"),
+                );
+                reported_bad = false;
+            }
+            Err(e) => {
+                if !reported_bad || seen.as_deref() != Some(json.as_str()) {
+                    audit.record(
+                        "-",
+                        "http",
+                        "-",
+                        None,
+                        &format!(
+                            "token file changed but is invalid ({e}); keeping the previous tokens"
+                        ),
+                    );
+                }
+                reported_bad = true;
+            }
+        }
+        seen = Some(json);
+    }
 }
 
 /// Audit lines for failed authentication per second, before the rest are only counted.
@@ -260,7 +331,7 @@ async fn require_token(
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    if let Some(identity) = bearer_token(header).and_then(|t| auth.tokens.lookup(t)) {
+    if let Some(identity) = bearer_token(header).and_then(|t| auth.current_tokens().lookup(t)) {
         req.extensions_mut().insert(identity);
         return next.run(req).await;
     }
@@ -309,10 +380,13 @@ where
         max: cfg.max_sessions,
     };
     let auth = Auth {
-        tokens: Arc::new(cfg.tokens),
+        tokens: Arc::new(RwLock::new(Arc::new(cfg.tokens))),
         audit,
         denials: Arc::new(Throttle::new(MAX_DENIAL_LOGS_PER_SEC)),
     };
+    if let Some(file) = cfg.token_file {
+        tokio::spawn(reload_tokens(file, auth.tokens.clone(), auth.audit.clone()));
+    }
     let mut app = Router::new().nest_service(
         "/mcp",
         Router::new()
