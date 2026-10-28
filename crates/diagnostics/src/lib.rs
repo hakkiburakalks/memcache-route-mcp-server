@@ -18,6 +18,10 @@ const EVICTIONS_QUIET_PER_SEC: f64 = 0.01;
 /// Average evictions per second (since start) from which a nearly full node is critical.
 const EVICTIONS_BUSY_PER_SEC: f64 = 1.0;
 
+/// `bytes` counts item data only, so a node that is evicting sits below 100% (slab and item
+/// overhead). Measured under load: about 90%. This is where "busy and full" starts.
+const BUSY_MEMORY_PCT: f64 = 80.0;
+
 /// Below this many gets the hit ratio says little.
 const MIN_GETS_FOR_RATIO: u64 = 1_000;
 
@@ -117,7 +121,7 @@ fn check_memory(stats: &Stats, out: &mut Vec<Finding>) {
                 format!(" (about {:.1}/hour on average)", r * 3600.0),
             ),
             Some(r) => (
-                if pct >= 90.0 && r >= EVICTIONS_BUSY_PER_SEC {
+                if pct >= BUSY_MEMORY_PCT && r >= EVICTIONS_BUSY_PER_SEC {
                     Severity::Critical
                 } else {
                     Severity::Warning
