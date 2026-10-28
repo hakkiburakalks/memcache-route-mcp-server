@@ -281,6 +281,8 @@ async fn reload_tokens(file: String, store: Arc<RwLock<Arc<TokenStore>>>, audit:
                 );
                 reported_bad = true;
             }
+            // Whatever comes back is re-checked, even if it equals what was loaded before.
+            seen = None;
             continue;
         };
         if seen.as_deref() == Some(json.as_str()) {
