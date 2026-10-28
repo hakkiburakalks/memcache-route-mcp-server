@@ -954,10 +954,22 @@ fn http_config(
         memcached: targets("MEMCACHED_MCP_METRICS_TARGETS")?,
         mcrouter: targets("MEMCACHED_MCP_MCROUTER_METRICS_TARGETS")?,
     };
+    let max_sessions = match std::env::var("MEMCACHED_MCP_HTTP_MAX_SESSIONS") {
+        Err(_) => http::DEFAULT_MAX_SESSIONS,
+        Ok(v) => v
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| {
+                format!("MEMCACHED_MCP_HTTP_MAX_SESSIONS must be a positive integer, got '{v}'")
+            })?,
+    };
     Ok(http::HttpConfig {
         bind,
         tokens,
         allowed_hosts,
         metrics,
+        max_sessions,
     })
 }

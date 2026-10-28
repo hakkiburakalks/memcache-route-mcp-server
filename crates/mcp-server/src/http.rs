@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, WWW_AUTHENTICATE};
-use axum::http::StatusCode;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, RETRY_AFTER, WWW_AUTHENTICATE};
+use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -25,12 +25,17 @@ use crate::auth::{Identity, Perm, TokenStore};
 /// Shorter tokens are refused at startup.
 pub const MIN_TOKEN_LEN: usize = 24;
 
+/// Open sessions allowed when `MEMCACHED_MCP_HTTP_MAX_SESSIONS` is not set.
+pub const DEFAULT_MAX_SESSIONS: usize = 256;
+
 pub struct HttpConfig {
     pub bind: SocketAddr,
     pub tokens: TokenStore,
     /// Extra `Host` values to accept besides loopback (for use behind a proxy).
     pub allowed_hosts: Vec<String>,
     pub metrics: MetricsTargets,
+    /// New sessions are refused with 503 while this many are open.
+    pub max_sessions: usize,
 }
 
 /// Servers exposed on `/metrics`. With both lists empty the endpoint is absent.
@@ -147,6 +152,29 @@ async fn require_known_host(
 }
 
 #[derive(Clone)]
+struct SessionCap {
+    sessions: Arc<LocalSessionManager>,
+    max: usize,
+}
+
+/// A POST to /mcp without `Mcp-Session-Id` opens a session; refuse it when the cap is reached.
+/// Sessions leave the map when they are closed or idle out, so the count is the live number.
+async fn cap_sessions(State(cap): State<SessionCap>, req: Request, next: Next) -> Response {
+    let opens_session =
+        req.method() == Method::POST && !req.headers().contains_key("mcp-session-id");
+    if opens_session && cap.sessions.sessions.read().await.len() >= cap.max {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(RETRY_AFTER, "30")],
+            "too many open sessions
+",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+#[derive(Clone)]
 struct Auth {
     tokens: Arc<TokenStore>,
     audit: Arc<Audit>,
@@ -205,17 +233,27 @@ where
     let mut hosts: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
     hosts.extend(cfg.allowed_hosts);
     let known_hosts = Arc::new(hosts.clone());
+    let sessions = Arc::new(LocalSessionManager::default());
     let mcp = StreamableHttpService::new(
         move || Ok(server.clone()),
-        Arc::new(LocalSessionManager::default()),
+        sessions.clone(),
         StreamableHttpServerConfig::default().with_allowed_hosts(hosts),
     );
+    let cap = SessionCap {
+        sessions,
+        max: cfg.max_sessions,
+    };
     let auth = Auth {
         tokens: Arc::new(cfg.tokens),
         audit,
         denials: Arc::new(Throttle::new(MAX_DENIAL_LOGS_PER_SEC)),
     };
-    let mut app = Router::new().nest_service("/mcp", mcp);
+    let mut app = Router::new().nest_service(
+        "/mcp",
+        Router::new()
+            .fallback_service(mcp)
+            .layer(middleware::from_fn_with_state(cap, cap_sessions)),
+    );
     if !cfg.metrics.memcached.is_empty() || !cfg.metrics.mcrouter.is_empty() {
         let metrics_routes = Router::new()
             .route("/metrics", get(metrics))

@@ -1161,3 +1161,53 @@ async fn concurrent_http_sessions_do_not_interfere() {
     }
     assert_eq!(done, 16);
 }
+
+/// Once the session cap is reached new sessions get 503, while open ones keep working.
+#[tokio::test]
+async fn http_session_cap_refuses_new_sessions() {
+    let mut child = command(
+        &[
+            ("MEMCACHED_MCP_ALLOWLIST", "127.0.0.1:1"),
+            ("MEMCACHED_MCP_HTTP_TOKEN", TOKEN),
+            ("MEMCACHED_MCP_HTTP_MAX_SESSIONS", "2"),
+        ],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+
+    let first = HttpMcp::start(port, TOKEN).await;
+    let _second = HttpMcp::start(port, TOKEN).await;
+
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}});
+    let (status, head, _) = http_post(port, TOKEN, None, &init).await;
+    assert_eq!(status, 503, "{head}");
+    assert!(head.contains("retry-after:"), "{head}");
+
+    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+    let (status, _, body) = http_post(port, TOKEN, Some(&first.session), &list).await;
+    assert_eq!(status, 200, "{body}");
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn http_max_sessions_must_be_a_positive_number() {
+    for bad in ["0", "many", "-1"] {
+        let out = command(
+            &[
+                ("MEMCACHED_MCP_ALLOWLIST", "127.0.0.1:1"),
+                ("MEMCACHED_MCP_HTTP_TOKEN", TOKEN),
+                ("MEMCACHED_MCP_HTTP_MAX_SESSIONS", bad),
+            ],
+            &["--http", "127.0.0.1:0"],
+        )
+        .output()
+        .await
+        .expect("run memcached-mcp");
+        assert!(!out.status.success(), "{bad} was accepted");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("MEMCACHED_MCP_HTTP_MAX_SESSIONS"), "{err}");
+    }
+}
