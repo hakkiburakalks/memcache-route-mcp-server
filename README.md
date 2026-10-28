@@ -145,7 +145,7 @@ A chart is in `deploy/helm/memcached-mcp`. It runs the HTTP transport as a non-r
 ```
 kubectl create secret generic memcached-mcp-auth --from-file=tokens.json
 helm install mcp deploy/helm/memcached-mcp \
-  --set image.repository=registry.example.com/memcached-mcp --set image.tag=0.1.0-alpha.6 \
+  --set image.repository=registry.example.com/memcached-mcp --set image.tag=0.1.0-alpha.7 \
   --set 'allowlist={memcached-0.memcached:11211}' \
   --set auth.existingSecret=memcached-mcp-auth
 ```
