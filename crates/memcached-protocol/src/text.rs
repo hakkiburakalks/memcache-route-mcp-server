@@ -37,17 +37,18 @@ pub fn encode_get(keys: &[&[u8]]) -> Result<Vec<u8>, ProtocolError> {
     Ok(out)
 }
 
-/// The group is spliced into the command line, so anything but a plain word is refused: a CR/LF
-/// in it would let the caller send a second, arbitrary command.
+/// `stats` groups that only report. Others change the server (`reset` zeroes every counter,
+/// `sizes_enable`/`sizes_disable` toggle a mode) or need arguments, and the group is spliced
+/// into the command line, so only these exact words are sent.
+const READ_ONLY_STATS_GROUPS: [&str; 6] =
+    ["items", "slabs", "sizes", "settings", "conns", "extstore"];
+
 pub fn encode_stats(arg: Option<&str>) -> Result<Vec<u8>, ProtocolError> {
     match arg {
         Some(a) => {
-            if a.is_empty()
-                || a.len() > 32
-                || !a.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-            {
+            if !READ_ONLY_STATS_GROUPS.contains(&a) {
                 return Err(ProtocolError::InvalidKey(
-                    "stats group must be 1-32 letters, digits or underscores",
+                    "stats group must be one of items, slabs, sizes, settings, conns, extstore",
                 ));
             }
             Ok(format!("stats {a}\r\n").into_bytes())
@@ -392,6 +393,10 @@ mod tests {
             "a b",
             "",
             "x\0",
+            "reset",
+            "sizes_enable",
+            "detail",
+            "ITEMS",
             too_long.as_str(),
         ] {
             assert!(

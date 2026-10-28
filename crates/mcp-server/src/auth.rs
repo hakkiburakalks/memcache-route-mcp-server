@@ -147,9 +147,19 @@ impl TokenStore {
     }
 
     pub fn from_json(json: &str) -> Result<Self, String> {
+        Self::parse(json, false)
+    }
+
+    /// For a running server: an empty user list is allowed and means nobody may log in, so
+    /// every token can be revoked at once.
+    pub fn reload_from_json(json: &str) -> Result<Self, String> {
+        Self::parse(json, true)
+    }
+
+    fn parse(json: &str, allow_empty: bool) -> Result<Self, String> {
         let f: FileFormat =
             serde_json::from_str(json).map_err(|e| format!("invalid token file: {e}"))?;
-        if f.users.is_empty() {
+        if f.users.is_empty() && !allow_empty {
             return Err("token file has no users".to_owned());
         }
         let (mut names, mut hashes) = (HashSet::new(), HashSet::new());

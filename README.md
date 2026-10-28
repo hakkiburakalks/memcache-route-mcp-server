@@ -78,7 +78,7 @@ It prints the token once (give it to Alice) and the entry to add to the file:
 | `write` | `set_key`, `delete_key`, `touch_key` |
 | `metrics` | `/metrics` |
 
-A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is re-read every 5 seconds while the server runs, so adding, changing or removing a user (revocation) takes effect without a restart, including for open sessions on their next request. If an edit does not parse, the server logs it to the audit log and keeps the previous users. Tokens are 256 random bits, so a fast hash is enough.
+A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is re-read every 5 seconds while the server runs, so adding, changing or removing a user (revocation) takes effect without a restart, including for open sessions on their next request. An empty `users` list on reload revokes everyone (at startup it is still an error). If an edit does not parse, the server logs it to the audit log and keeps the previous users. Tokens are 256 random bits, so a fast hash is enough.
 
 ### Prometheus metrics
 

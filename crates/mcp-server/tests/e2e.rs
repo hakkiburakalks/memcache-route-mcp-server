@@ -181,6 +181,9 @@ async fn read_tools_cannot_smuggle_commands() {
         "settings\r\ndelete e2e:inject",
         "settings\ndelete e2e:inject",
         "items delete e2e:inject",
+        // Plain words that still change the server.
+        "reset",
+        "sizes_enable",
     ] {
         let (err, text) = r
             .call("get_stats", json!({"addr":addr,"group":group}))
@@ -241,6 +244,17 @@ async fn stdio_writes_are_gated_prefixed_and_audited() {
         )
         .await;
     assert!(!err && text == "Stored", "{text}");
+
+    // Above 30 days memcached would read the TTL as a unix time and expire the item at once.
+    for ttl in [2_592_001_i64, 3_000_000] {
+        let (err, text) = s
+            .call(
+                "set_key",
+                json!({"addr":addr,"key":"e2e:k","value":"v","ttl_seconds":ttl}),
+            )
+            .await;
+        assert!(err && text.contains("ttl_seconds"), "{ttl}: {text}");
+    }
 
     let (err, text) = s
         .call("get_key_metadata", json!({"addr":addr,"key":"e2e:k"}))
@@ -1091,6 +1105,11 @@ async fn token_file_is_reloaded_while_running() {
     tokio::time::sleep(Duration::from_secs(7)).await;
     assert_eq!(http_post(port, &a_token, None, &json!({})).await.0, 401);
     assert_ne!(http_post(port, &b_token, None, &json!({})).await.0, 401);
+
+    // An empty list revokes everyone.
+    std::fs::write(&tokens, r#"{"users":[]}"#).unwrap();
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(http_post(port, &b_token, None, &json!({})).await.0, 401);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -178,7 +178,7 @@ impl MemcachedServer {
     }
 
     #[tool(
-        description = "Return memcached `stats` (optionally a group such as settings, items, slabs) as JSON.",
+        description = "Return memcached `stats` (optionally one group: items, slabs, sizes, settings, conns or extstore) as JSON. Groups that change the server, such as reset, are refused.",
         annotations(read_only_hint = true)
     )]
     async fn get_stats(
@@ -652,9 +652,7 @@ impl MemcachedServer {
         self.authorize(&who, Perm::Write, "set_key", &a.addr)?;
         self.check_write_key(&who, &a.addr, &a.key, "set_key")?;
         let ttl = a.ttl_seconds.unwrap_or(0);
-        if ttl < 0 {
-            return Err("ttl_seconds must not be negative".to_owned());
-        }
+        check_ttl(ttl)?;
         if a.value.len() > MAX_VALUE_BYTES {
             return Err(format!(
                 "value is {} bytes; the limit is {MAX_VALUE_BYTES}",
@@ -711,9 +709,7 @@ impl MemcachedServer {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Write, "touch_key", &a.addr)?;
         self.check_write_key(&who, &a.addr, &a.key, "touch_key")?;
-        if a.ttl_seconds < 0 {
-            return Err("ttl_seconds must not be negative".to_owned());
-        }
+        check_ttl(a.ttl_seconds)?;
         let mut c = self.connect(&who, &a.addr).await?;
         let res = c
             .touch(a.key.as_bytes(), a.ttl_seconds)
@@ -814,6 +810,22 @@ fn http_bind_from_args() -> Result<Option<std::net::SocketAddr>, String> {
         Some(other) => Err(format!(
             "unknown argument '{other}'; usage: memcached-mcp [--http ADDR:PORT]"
         )),
+    }
+}
+
+/// Memcached reads a TTL above 30 days as an absolute unix time, so such a value would store an
+/// item that is already expired.
+const MAX_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
+
+fn check_ttl(ttl: i64) -> Result<(), String> {
+    if ttl < 0 {
+        Err("ttl_seconds must not be negative".to_owned())
+    } else if ttl > MAX_TTL_SECONDS {
+        Err(format!(
+            "ttl_seconds must be at most {MAX_TTL_SECONDS} (30 days); memcached would read a larger value as a unix timestamp"
+        ))
+    } else {
+        Ok(())
     }
 }
 

@@ -288,7 +288,7 @@ async fn reload_tokens(file: String, store: Arc<RwLock<Arc<TokenStore>>>, audit:
         if seen.as_deref() == Some(json.as_str()) {
             continue;
         }
-        match TokenStore::from_json(&json) {
+        match TokenStore::reload_from_json(&json) {
             Ok(new) => {
                 let n = new.len();
                 *store.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(new);
