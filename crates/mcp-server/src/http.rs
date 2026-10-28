@@ -3,6 +3,7 @@
 //! There is no TLS here: keep the listener on loopback or put a TLS-terminating proxy in front.
 
 use std::collections::BTreeMap;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -411,11 +412,53 @@ where
 
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     eprintln!("listening on http://{}/mcp", listener.local_addr()?);
-    axum::serve(
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await
+    .with_graceful_shutdown(async {
+        shutdown_signal().await;
+        eprintln!("shutdown: signal received, draining");
+    });
+    // Long-lived streams (SSE) never finish on their own, so draining is bounded.
+    let mut serve = std::pin::pin!(serve.into_future());
+    tokio::select! {
+        r = &mut serve => r,
+        () = async {
+            shutdown_signal().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => {
+            eprintln!("shutdown: open connections did not finish within {SHUTDOWN_GRACE:?}; exiting");
+            Ok(())
+        }
+    }
+}
+
+/// How long in-flight requests get to finish after SIGTERM/SIGINT.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Resolves on SIGINT, or on SIGTERM where that exists. As PID 1 in a container the process gets
+/// no default signal action, so without this `docker stop` and rollouts end in SIGKILL.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[cfg(test)]

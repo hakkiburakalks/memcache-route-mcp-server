@@ -9,7 +9,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 thiserror = "2"
-tokio = { version = "1", features = ["net", "io-util", "time", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["net", "io-util", "time", "rt-multi-thread", "macros", "signal"] }
 
 [profile.release]
 lto = "thin"
