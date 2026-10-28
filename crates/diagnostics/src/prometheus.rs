@@ -228,6 +228,30 @@ pub fn render_mcrouter(nodes: &[(String, Option<Stats>)]) -> String {
     )
 }
 
+/// Reachability of each destination an mcrouter routes to, as `(mcrouter, destination, up)`.
+/// Empty input renders nothing.
+pub fn render_mcrouter_destinations(rows: &[(String, String, bool)]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# HELP mcrouter_destination_up Whether this server could be reached directly from the MCP server (not mcrouter's own view of it)."
+    );
+    let _ = writeln!(out, "# TYPE mcrouter_destination_up gauge");
+    for (router, dest, up) in rows {
+        let _ = writeln!(
+            out,
+            "mcrouter_destination_up{{instance=\"{}\",destination=\"{}\"}} {}",
+            escape_label(router),
+            escape_label(dest),
+            u8::from(*up)
+        );
+    }
+    out
+}
+
 fn render_with(
     up_name: &str,
     up_help: &str,
@@ -314,6 +338,27 @@ mod tests {
     fn escapes_label_values() {
         let out = render(&[("we\"ird\\host".into(), None)]);
         assert!(out.contains(r#"instance="we\"ird\\host""#));
+    }
+
+    #[test]
+    fn renders_destination_reachability() {
+        assert_eq!(render_mcrouter_destinations(&[]), "");
+        let out = render_mcrouter_destinations(&[
+            ("r:5000".into(), "mc-a:11211".into(), true),
+            ("r:5000".into(), "m\"c-b".into(), false),
+        ]);
+        assert!(out.contains(
+            "# TYPE mcrouter_destination_up gauge
+"
+        ));
+        assert!(out.contains(
+            "mcrouter_destination_up{instance=\"r:5000\",destination=\"mc-a:11211\"} 1
+"
+        ));
+        assert!(out.contains(
+            "destination=\"m\\\"c-b\"} 0
+"
+        ));
     }
 
     #[test]

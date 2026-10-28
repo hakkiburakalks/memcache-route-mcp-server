@@ -785,7 +785,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     match http_bind_from_args()? {
         Some(bind) => {
-            let cfg = http_config(bind, &server.allowlist)?;
+            let cfg = http_config(bind, &server.allowlist, &server.dest_map)?;
             let audit = server.audit.clone();
             server.http_mode = true;
             http::serve(server, audit, cfg).await?;
@@ -918,6 +918,7 @@ fn new_token_command() -> Result<(), String> {
 fn http_config(
     bind: std::net::SocketAddr,
     allowlist: &HashSet<String>,
+    dest_map: &BTreeMap<String, String>,
 ) -> Result<http::HttpConfig, String> {
     let tokens = token_store()?;
     if !bind.ip().is_loopback()
@@ -953,6 +954,12 @@ fn http_config(
     let metrics = http::MetricsTargets {
         memcached: targets("MEMCACHED_MCP_METRICS_TARGETS")?,
         mcrouter: targets("MEMCACHED_MCP_MCROUTER_METRICS_TARGETS")?,
+        // Only destinations we may talk to anyway are probed.
+        dest_map: dest_map
+            .iter()
+            .filter(|(_, real)| allowlist.contains(*real))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
     };
     let max_sessions = match std::env::var("MEMCACHED_MCP_HTTP_MAX_SESSIONS") {
         Err(_) => http::DEFAULT_MAX_SESSIONS,

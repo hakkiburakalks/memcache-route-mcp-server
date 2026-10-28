@@ -2,6 +2,7 @@
 //!
 //! There is no TLS here: keep the listener on loopback or put a TLS-terminating proxy in front.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +44,8 @@ pub struct HttpConfig {
 pub struct MetricsTargets {
     pub memcached: Vec<String>,
     pub mcrouter: Vec<String>,
+    /// mcrouter's name for a destination -> an allowlisted address we can probe.
+    pub dest_map: BTreeMap<String, String>,
 }
 
 const SCRAPE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -76,6 +79,64 @@ async fn scrape_all(targets: &[String]) -> Vec<(String, Option<diagnostics::Stat
         .collect()
 }
 
+/// Probes every mapped destination of one mcrouter, concurrently. A router that cannot be read
+/// yields no rows (its `mcrouter_up` already says so); unmapped destinations cannot be probed.
+async fn probe_destinations(
+    router: String,
+    dest_map: &BTreeMap<String, String>,
+) -> Vec<(String, String, bool)> {
+    let config = async {
+        let mut c = Client::connect(&router, SCRAPE_TIMEOUT).await.ok()?;
+        let (_, raw) = c.get(mcrouter::CONFIG_KEY.as_bytes()).await.ok()??;
+        mcrouter::parse_config(&String::from_utf8(raw).ok()?).ok()
+    }
+    .await;
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    let mut set = tokio::task::JoinSet::new();
+    for (i, dest) in mcrouter::destinations(&config).into_iter().enumerate() {
+        let Some(real) = dest_map.get(&dest).cloned() else {
+            continue;
+        };
+        set.spawn(async move {
+            let up = match Client::connect(&real, SCRAPE_TIMEOUT).await {
+                Ok(mut c) => c.version().await.is_ok(),
+                Err(_) => false,
+            };
+            (i, dest, up)
+        });
+    }
+    let mut rows = Vec::new();
+    while let Some(Ok(row)) = set.join_next().await {
+        rows.push(row);
+    }
+    rows.sort_by_key(|(i, _, _)| *i);
+    rows.into_iter()
+        .map(|(_, dest, up)| (router.clone(), dest, up))
+        .collect()
+}
+
+async fn probe_all_destinations(
+    routers: &[String],
+    dest_map: &BTreeMap<String, String>,
+) -> Vec<(String, String, bool)> {
+    if dest_map.is_empty() {
+        return Vec::new();
+    }
+    let mut set = tokio::task::JoinSet::new();
+    for (i, router) in routers.iter().cloned().enumerate() {
+        let dest_map = dest_map.clone();
+        set.spawn(async move { (i, probe_destinations(router, &dest_map).await) });
+    }
+    let mut all = Vec::new();
+    while let Some(Ok(rows)) = set.join_next().await {
+        all.push(rows);
+    }
+    all.sort_by_key(|(i, _)| *i);
+    all.into_iter().flat_map(|(_, rows)| rows).collect()
+}
+
 /// An unreachable target is reported as `*_up 0`.
 async fn metrics(
     State(targets): State<Arc<MetricsTargets>>,
@@ -91,9 +152,10 @@ async fn metrics(
         )
             .into_response();
     }
-    let (memcached, mcrouter) = tokio::join!(
+    let (memcached, mcrouter, destinations) = tokio::join!(
         scrape_all(&targets.memcached),
-        scrape_all(&targets.mcrouter)
+        scrape_all(&targets.mcrouter),
+        probe_all_destinations(&targets.mcrouter, &targets.dest_map)
     );
     let mut body = String::new();
     if !memcached.is_empty() {
@@ -102,6 +164,9 @@ async fn metrics(
     if !mcrouter.is_empty() {
         body.push_str(&diagnostics::prometheus::render_mcrouter(&mcrouter));
     }
+    body.push_str(&diagnostics::prometheus::render_mcrouter_destinations(
+        &destinations,
+    ));
     (
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,

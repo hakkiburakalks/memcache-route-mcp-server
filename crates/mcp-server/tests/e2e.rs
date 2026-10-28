@@ -1211,3 +1211,80 @@ async fn http_max_sessions_must_be_a_positive_number() {
         assert!(err.contains("MEMCACHED_MCP_HTTP_MAX_SESSIONS"), "{err}");
     }
 }
+
+fn fake_reply(line: &str, config: &str) -> String {
+    if line.starts_with("get ") {
+        format!(
+            "VALUE __mcrouter__.preprocessed_config 0 {}\r\n{config}\r\nEND\r\n",
+            config.len()
+        )
+    } else if line == "version" {
+        "VERSION 1.6.0\r\n".to_owned()
+    } else {
+        "STAT num_servers 2\r\nEND\r\n".to_owned()
+    }
+}
+
+/// A stand-in that answers just enough text protocol for the metrics scrape: the mcrouter config
+/// key, `stats` and `version`. Returns its address.
+async fn fake_mcrouter(config: &str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let config = config.to_owned();
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let config = config.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let (rd, mut wr) = sock.into_split();
+                let mut lines = BufReader::new(rd).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let reply = fake_reply(&line, &config);
+                    if wr.write_all(reply.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Per-destination reachability on /metrics: mapped and allowlisted destinations are probed
+/// directly, unmapped or non-allowlisted ones are left out.
+#[tokio::test]
+async fn metrics_report_each_mapped_destination() {
+    let alive = fake_mcrouter("{}").await;
+    let dead = "127.0.0.1:1";
+    let config = r#"{"pools":{"p":{"servers":["mc-a:11211","mc-b:11211","mc-c:11211","mc-d:11211"]}},"route":"PoolRoute|p"}"#;
+    let router = fake_mcrouter(config).await;
+    // mc-c has no mapping; mc-d maps to an address that is not allowlisted.
+    let map = format!("mc-a:11211={alive},mc-b:11211={dead},mc-d:11211=127.0.0.1:2");
+    let allow = format!("{router},{alive},{dead}");
+    let mut child = command(
+        &[
+            ("MEMCACHED_MCP_ALLOWLIST", &allow),
+            ("MEMCACHED_MCP_HTTP_TOKEN", TOKEN),
+            ("MEMCACHED_MCP_MCROUTER_METRICS_TARGETS", &router),
+            ("MEMCACHED_MCP_DEST_MAP", &map),
+        ],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+    let auth = format!("Bearer {TOKEN}");
+    let (status, body) = http_get(port, "/metrics", &[("Authorization", &auth)]).await;
+    assert_eq!(status, 200, "{body}");
+    let line = |dest: &str, up: u8| {
+        format!("mcrouter_destination_up{{instance=\"{router}\",destination=\"{dest}\"}} {up}")
+    };
+    assert!(body.contains(&line("mc-a:11211", 1)), "{body}");
+    assert!(body.contains(&line("mc-b:11211", 0)), "{body}");
+    assert!(!body.contains("mc-c:11211"), "{body}");
+    assert!(!body.contains("mc-d:11211"), "{body}");
+    let _ = child.kill().await;
+}
