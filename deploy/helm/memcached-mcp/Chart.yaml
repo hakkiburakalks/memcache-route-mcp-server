@@ -3,4 +3,4 @@ name: memcached-mcp
 description: MCP server for inspecting and diagnosing Memcached and mcrouter (Streamable HTTP).
 type: application
 version: 0.1.0
-appVersion: "0.1.0-alpha.7"
+appVersion: "0.1.0-alpha.8"
