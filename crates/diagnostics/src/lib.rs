@@ -61,8 +61,12 @@ pub fn analyze_node(stats: &Stats, items: &Stats, settings: &Stats) -> Vec<Findi
     out
 }
 
+fn gets(stats: &Stats) -> u64 {
+    num(stats, "get_hits").unwrap_or(0) + num(stats, "get_misses").unwrap_or(0)
+}
+
 fn check_hit_ratio(stats: &Stats, out: &mut Vec<Finding>) {
-    let gets = num(stats, "get_hits").unwrap_or(0) + num(stats, "get_misses").unwrap_or(0);
+    let gets = gets(stats);
     let Some(ratio) = hit_ratio(stats) else {
         return;
     };
@@ -220,6 +224,8 @@ pub fn compare_nodes(nodes: &[NodeSummary<'_>]) -> Vec<Finding> {
     }
     let ratios: Vec<(&str, f64)> = nodes
         .iter()
+        // A node that has barely been read says nothing about its hit ratio.
+        .filter(|n| gets(n.stats) >= MIN_GETS_FOR_RATIO)
         .filter_map(|n| hit_ratio(n.stats).map(|r| (n.name, r)))
         .collect();
     if let (Some(lo), Some(hi)) = (
@@ -388,18 +394,18 @@ mod tests {
     fn compare_finds_outliers() {
         let a = st(&[
             ("curr_items", "1000"),
-            ("get_hits", "90"),
-            ("get_misses", "10"),
+            ("get_hits", "9000"),
+            ("get_misses", "1000"),
         ]);
         let b = st(&[
             ("curr_items", "1100"),
-            ("get_hits", "90"),
-            ("get_misses", "10"),
+            ("get_hits", "9000"),
+            ("get_misses", "1000"),
         ]);
         let c = st(&[
             ("curr_items", "5000"),
-            ("get_hits", "50"),
-            ("get_misses", "50"),
+            ("get_hits", "5000"),
+            ("get_misses", "5000"),
         ]);
         let nodes = [
             NodeSummary {
@@ -422,5 +428,26 @@ mod tests {
             compare_nodes(&nodes[..2])[0].code,
             "compare_needs_three_nodes"
         );
+    }
+
+    #[test]
+    fn compare_ignores_hit_ratio_of_barely_read_nodes() {
+        let busy = st(&[("get_hits", "9000"), ("get_misses", "1000")]);
+        let idle = st(&[("get_hits", "0"), ("get_misses", "5")]);
+        let nodes = [
+            NodeSummary {
+                name: "a",
+                stats: &busy,
+            },
+            NodeSummary {
+                name: "b",
+                stats: &busy,
+            },
+            NodeSummary {
+                name: "c",
+                stats: &idle,
+            },
+        ];
+        assert!(compare_nodes(&nodes).is_empty());
     }
 }
