@@ -1262,6 +1262,35 @@ async fn http_session_cap_refuses_new_sessions() {
     let _ = child.kill().await;
 }
 
+/// One user cannot hold more than its share of the sessions, even below the global cap.
+#[tokio::test]
+async fn http_session_cap_is_also_per_user() {
+    let mut child = command(
+        &[
+            ("MEMCACHED_MCP_ALLOWLIST", "127.0.0.1:1"),
+            ("MEMCACHED_MCP_HTTP_TOKEN", TOKEN),
+            ("MEMCACHED_MCP_HTTP_MAX_SESSIONS", "10"),
+            ("MEMCACHED_MCP_HTTP_MAX_SESSIONS_PER_USER", "1"),
+        ],
+        &["--http", "127.0.0.1:0"],
+    )
+    .spawn()
+    .expect("spawn memcached-mcp");
+    let port = listening_port(&mut child).await;
+
+    let first = HttpMcp::start(port, TOKEN).await;
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}});
+    let (status, _, body) = http_post(port, TOKEN, None, &init).await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("for this user"), "{body}");
+
+    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+    let (status, _, body) = http_post(port, TOKEN, Some(&first.session), &list).await;
+    assert_eq!(status, 200, "{body}");
+    let _ = child.kill().await;
+}
+
 #[tokio::test]
 async fn http_max_sessions_must_be_a_positive_number() {
     for bad in ["0", "many", "-1"] {

@@ -31,6 +31,10 @@ pub const MIN_TOKEN_LEN: usize = 24;
 /// Open sessions allowed when `MEMCACHED_MCP_HTTP_MAX_SESSIONS` is not set.
 pub const DEFAULT_MAX_SESSIONS: usize = 256;
 
+/// Sessions one user may hold when `MEMCACHED_MCP_HTTP_MAX_SESSIONS_PER_USER` is not set, so a
+/// single token cannot use up the global cap.
+pub const DEFAULT_MAX_SESSIONS_PER_USER: usize = 32;
+
 /// Requests one user may have in flight at once when `MEMCACHED_MCP_HTTP_MAX_CONCURRENT` is not
 /// set. Every tool call opens its own connection to memcached, so this bounds what one token
 /// can do to a server.
@@ -46,6 +50,8 @@ pub struct HttpConfig {
     pub metrics: MetricsTargets,
     /// New sessions are refused with 503 while this many are open.
     pub max_sessions: usize,
+    /// Open sessions one user may hold; more get 503.
+    pub max_sessions_per_user: usize,
     /// Requests per user in flight at once; more get 429.
     pub max_concurrent: usize,
 }
@@ -257,23 +263,58 @@ async fn require_known_host(
 struct SessionCap {
     sessions: Arc<LocalSessionManager>,
     max: usize,
+    max_per_user: usize,
+    /// Session ids each user opened. Ids of sessions that have since closed are dropped lazily.
+    owners: Arc<Mutex<HashMap<Arc<str>, Vec<String>>>>,
 }
 
-/// A POST to /mcp without `Mcp-Session-Id` opens a session; refuse it when the cap is reached.
-/// Sessions leave the map when they are closed or idle out, so the count is the live number.
+/// A POST to /mcp without `Mcp-Session-Id` opens a session; refuse it when the cap is reached,
+/// either overall or for this user. Sessions leave the map when they are closed or idle out, so
+/// the count is the live number.
 async fn cap_sessions(State(cap): State<SessionCap>, req: Request, next: Next) -> Response {
     let opens_session =
         req.method() == Method::POST && !req.headers().contains_key("mcp-session-id");
-    if opens_session && cap.sessions.sessions.read().await.len() >= cap.max {
-        return (
+    if !opens_session {
+        return next.run(req).await;
+    }
+    let user = req.extensions().get::<Identity>().map(|i| i.name.clone());
+    let refuse = |why: &'static str| {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             [(RETRY_AFTER, "30")],
-            "too many open sessions
-",
+            format!(
+                "{why}
+"
+            ),
         )
-            .into_response();
+            .into_response()
+    };
+    {
+        let live = cap.sessions.sessions.read().await;
+        if live.len() >= cap.max {
+            return refuse("too many open sessions");
+        }
+        if let Some(user) = &user {
+            let mut owners = cap.owners.lock().unwrap_or_else(|e| e.into_inner());
+            let mine = owners.entry(user.clone()).or_default();
+            mine.retain(|id| live.contains_key(id.as_str()));
+            if mine.len() >= cap.max_per_user {
+                return refuse("too many open sessions for this user");
+            }
+        }
     }
-    next.run(req).await
+    let resp = next.run(req).await;
+    if let (Some(user), Some(id)) = (user, resp.headers().get("mcp-session-id")) {
+        if let Ok(id) = id.to_str() {
+            cap.owners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(user)
+                .or_default()
+                .push(id.to_owned());
+        }
+    }
+    resp
 }
 
 #[derive(Clone)]
@@ -440,6 +481,8 @@ where
     let cap = SessionCap {
         sessions,
         max: cfg.max_sessions,
+        max_per_user: cfg.max_sessions_per_user,
+        owners: Arc::default(),
     };
     let auth = Auth {
         tokens: Arc::new(RwLock::new(Arc::new(cfg.tokens))),
