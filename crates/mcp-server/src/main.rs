@@ -25,7 +25,12 @@ const OP_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_VALUE_BYTES: usize = 1024 * 1024;
 
 /// Nodes are contacted one after another, each with its own timeout, so the list is bounded.
-const MAX_COMPARE_NODES: usize = 32;
+/// Nodes one `compare_nodes` call may name.
+const MAX_COMPARE_NODES: usize = 256;
+
+/// Connections a multi-node tool keeps open at once, so a big cluster is read in parallel without
+/// opening hundreds of connections together.
+const PARALLEL_FETCHES: usize = 16;
 
 #[derive(Clone)]
 struct MemcachedServer {
@@ -144,16 +149,61 @@ impl MemcachedServer {
         })
     }
 
-    async fn connect(&self, who: &Identity, addr: &str) -> Result<Client, String> {
+    fn check_allowed(&self, who: &Identity, addr: &str) -> Result<(), String> {
         if !self.allowlist.contains(addr) {
             self.audit
                 .record(&who.name, "connect", addr, None, "denied: not in allowlist");
             return Err(format!("{addr} is not in MEMCACHED_MCP_ALLOWLIST"));
         }
+        Ok(())
+    }
+
+    async fn connect(&self, who: &Identity, addr: &str) -> Result<Client, String> {
+        self.check_allowed(who, addr)?;
         Client::connect(addr, OP_TIMEOUT)
             .await
             .map_err(|e| e.to_string())
     }
+}
+
+/// Runs `work` on every item with at most [`PARALLEL_FETCHES`] in flight. Results keep the order
+/// of `items`, so output stays deterministic.
+async fn fetch_parallel<I, T, F, Fut>(items: Vec<I>, work: F) -> Vec<T>
+where
+    I: Send + 'static,
+    T: Send + 'static,
+    F: Fn(I) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = T> + Send + 'static,
+{
+    let gate = Arc::new(tokio::sync::Semaphore::new(PARALLEL_FETCHES));
+    let mut set = tokio::task::JoinSet::new();
+    for (i, item) in items.into_iter().enumerate() {
+        let (gate, work) = (gate.clone(), work.clone());
+        set.spawn(async move {
+            let _slot = gate.acquire_owned().await;
+            (i, work(item).await)
+        });
+    }
+    let mut out = Vec::new();
+    while let Some(Ok(r)) = set.join_next().await {
+        out.push(r);
+    }
+    out.sort_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, r)| r).collect()
+}
+
+/// `stats`, `stats items` and `stats settings` of one node over a single connection. The last two
+/// are optional: older servers may lack them, and the rules that need them are skipped.
+async fn fetch_node(
+    addr: String,
+) -> Result<(diagnostics::Stats, diagnostics::Stats, diagnostics::Stats), String> {
+    let mut c = Client::connect(&addr, OP_TIMEOUT)
+        .await
+        .map_err(|e| e.to_string())?;
+    let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+    let items = c.stats(Some("items")).await.unwrap_or_default();
+    let settings = c.stats(Some("settings")).await.unwrap_or_default();
+    Ok((stats, items, settings))
 }
 
 #[tool_router]
@@ -273,13 +323,24 @@ impl MemcachedServer {
                 a.addrs.len()
             ));
         }
-        let mut collected = Vec::new();
         let mut unreachable = Vec::new();
+        let mut allowed = Vec::new();
         for addr in &a.addrs {
-            let res = match self.connect(&who, addr).await {
-                Ok(mut c) => c.stats(None).await.map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            };
+            match self.check_allowed(&who, addr) {
+                Ok(()) => allowed.push(addr.clone()),
+                Err(e) => unreachable.push(format!("{addr}: {e}")),
+            }
+        }
+        let fetched = fetch_parallel(allowed.clone(), |addr| async move {
+            // Only the plain stats are needed here.
+            let mut c = Client::connect(&addr, OP_TIMEOUT)
+                .await
+                .map_err(|e| e.to_string())?;
+            c.stats(None).await.map_err(|e| e.to_string())
+        })
+        .await;
+        let mut collected = Vec::new();
+        for (addr, res) in allowed.iter().zip(fetched) {
             match res {
                 Ok(s) => collected.push((addr.as_str(), s)),
                 Err(e) => unreachable.push(format!("{addr}: {e}")),
@@ -360,20 +421,20 @@ impl MemcachedServer {
 
         let mut unmapped = Vec::new();
         let mut unreachable = Vec::new();
-        let mut collected = Vec::new();
+        let mut targets = Vec::new();
         for dest in mcrouter::destinations(&cfg) {
             let Some(real) = self.dest_map.get(&dest) else {
                 unmapped.push(dest);
                 continue;
             };
-            let res = async {
-                let mut c = self.connect(&who, real).await?;
-                let stats = c.stats(None).await.map_err(|e| e.to_string())?;
-                let items = c.stats(Some("items")).await.unwrap_or_default();
-                let settings = c.stats(Some("settings")).await.unwrap_or_default();
-                Ok::<_, String>((stats, items, settings))
+            match self.check_allowed(&who, real) {
+                Ok(()) => targets.push((dest, real.clone())),
+                Err(e) => unreachable.push(format!("{dest} -> {real}: {e}")),
             }
-            .await;
+        }
+        let fetched = fetch_parallel(targets.clone(), |(_, real)| fetch_node(real)).await;
+        let mut collected = Vec::new();
+        for ((dest, real), res) in targets.into_iter().zip(fetched) {
             match res {
                 Ok(data) => collected.push((dest, data)),
                 Err(e) => unreachable.push(format!("{dest} -> {real}: {e}")),

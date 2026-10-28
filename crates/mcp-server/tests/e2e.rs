@@ -208,7 +208,7 @@ async fn read_tools_cannot_smuggle_commands() {
         "the key must have survived"
     );
 
-    let many: Vec<_> = (0..33).map(|_| addr.clone()).collect();
+    let many: Vec<_> = (0..257).map(|_| addr.clone()).collect();
     let (err, text) = r.call("compare_nodes", json!({"addrs":many})).await;
     assert!(err && text.contains("at most"), "{text}");
 
