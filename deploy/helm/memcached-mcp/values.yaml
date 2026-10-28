@@ -45,7 +45,13 @@ service:
   type: ClusterIP
   port: 8080
 
-resources: {}
+# Modest defaults: the server is a thin proxy, but each tool call buffers up to 16 MiB of value.
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
 nodeSelector: {}
 tolerations: []
 affinity: {}
