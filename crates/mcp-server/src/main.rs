@@ -984,6 +984,17 @@ fn http_config(
                 format!("MEMCACHED_MCP_HTTP_MAX_SESSIONS must be a positive integer, got '{v}'")
             })?,
     };
+    let max_concurrent = match std::env::var("MEMCACHED_MCP_HTTP_MAX_CONCURRENT") {
+        Err(_) => http::DEFAULT_MAX_CONCURRENT,
+        Ok(v) => v
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| {
+                format!("MEMCACHED_MCP_HTTP_MAX_CONCURRENT must be a positive integer, got '{v}'")
+            })?,
+    };
     Ok(http::HttpConfig {
         bind,
         tokens,
@@ -991,5 +1002,6 @@ fn http_config(
         allowed_hosts,
         metrics,
         max_sessions,
+        max_concurrent,
     })
 }

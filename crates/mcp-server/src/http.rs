@@ -2,10 +2,10 @@
 //!
 //! There is no TLS here: keep the listener on loopback or put a TLS-terminating proxy in front.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::IntoFuture;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -20,6 +20,7 @@ use memcached_core::Client;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServerHandler;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::audit::{Admit, Audit, Throttle};
 use crate::auth::{Identity, Perm, TokenStore};
@@ -29,6 +30,11 @@ pub const MIN_TOKEN_LEN: usize = 24;
 
 /// Open sessions allowed when `MEMCACHED_MCP_HTTP_MAX_SESSIONS` is not set.
 pub const DEFAULT_MAX_SESSIONS: usize = 256;
+
+/// Requests one user may have in flight at once when `MEMCACHED_MCP_HTTP_MAX_CONCURRENT` is not
+/// set. Every tool call opens its own connection to memcached, so this bounds what one token
+/// can do to a server.
+pub const DEFAULT_MAX_CONCURRENT: usize = 16;
 
 pub struct HttpConfig {
     pub bind: SocketAddr,
@@ -40,6 +46,34 @@ pub struct HttpConfig {
     pub metrics: MetricsTargets,
     /// New sessions are refused with 503 while this many are open.
     pub max_sessions: usize,
+    /// Requests per user in flight at once; more get 429.
+    pub max_concurrent: usize,
+}
+
+/// Hands out at most `max` permits per user name.
+struct ConcurrencyLimit {
+    max: usize,
+    users: Mutex<HashMap<Arc<str>, Arc<Semaphore>>>,
+}
+
+impl ConcurrencyLimit {
+    fn new(max: usize) -> Self {
+        Self {
+            max,
+            users: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn try_acquire(&self, user: &Arc<str>) -> Option<OwnedSemaphorePermit> {
+        let sem = self
+            .users
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(user.clone())
+            .or_insert_with(|| Arc::new(Semaphore::new(self.max)))
+            .clone();
+        sem.try_acquire_owned().ok()
+    }
 }
 
 /// Servers exposed on `/metrics`. With both lists empty the endpoint is absent.
@@ -248,6 +282,7 @@ struct Auth {
     audit: Arc<Audit>,
     /// Bad-token attempts come from anyone who can reach the port, so their audit lines are capped.
     denials: Arc<Throttle>,
+    concurrency: Arc<ConcurrencyLimit>,
 }
 
 impl Auth {
@@ -335,6 +370,30 @@ async fn require_token(
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     if let Some(identity) = bearer_token(header).and_then(|t| auth.current_tokens().lookup(t)) {
+        // Only POSTs: they carry tool calls. A GET is a long-lived event stream.
+        let _permit = if req.method() == Method::POST {
+            match auth.concurrency.try_acquire(&identity.name) {
+                Some(p) => Some(p),
+                None => {
+                    auth.audit.record(
+                        &identity.name,
+                        "http",
+                        &peer.to_string(),
+                        None,
+                        "denied: too many concurrent requests",
+                    );
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [(RETRY_AFTER, "1")],
+                        "too many concurrent requests
+",
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            None
+        };
         req.extensions_mut().insert(identity);
         return next.run(req).await;
     }
@@ -386,6 +445,7 @@ where
         tokens: Arc::new(RwLock::new(Arc::new(cfg.tokens))),
         audit,
         denials: Arc::new(Throttle::new(MAX_DENIAL_LOGS_PER_SEC)),
+        concurrency: Arc::new(ConcurrencyLimit::new(cfg.max_concurrent)),
     };
     if let Some(file) = cfg.token_file {
         tokio::spawn(reload_tokens(file, auth.tokens.clone(), auth.audit.clone()));
@@ -464,6 +524,21 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrency_is_limited_per_user() {
+        let limit = ConcurrencyLimit::new(2);
+        let (a, b): (Arc<str>, Arc<str>) = ("a".into(), "b".into());
+        let p1 = limit.try_acquire(&a).expect("first");
+        let _p2 = limit.try_acquire(&a).expect("second");
+        assert!(limit.try_acquire(&a).is_none(), "third must be refused");
+        assert!(
+            limit.try_acquire(&b).is_some(),
+            "other users are unaffected"
+        );
+        drop(p1);
+        assert!(limit.try_acquire(&a).is_some(), "a freed slot is reusable");
+    }
 
     #[test]
     fn host_header_matching() {
