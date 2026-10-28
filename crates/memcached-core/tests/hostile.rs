@@ -164,3 +164,20 @@ async fn uniform_sample_reports_a_capped_scan_as_incomplete() {
     assert!(!sample.complete);
     assert_eq!((sample.seen, sample.entries.len()), (1_000, 100));
 }
+
+/// After a reply was cut short the next command must fail, not read the leftovers as its answer.
+#[tokio::test]
+async fn connection_is_unusable_after_a_stalled_reply() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"STAT a 1\r\n").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ = s.write_all(b"STAT b 2\r\nEND\r\n").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_millis(300))
+        .await
+        .unwrap();
+    assert!(c.stats(Some("items")).await.is_err());
+    let err = c.stats(Some("settings")).await.unwrap_err().to_string();
+    assert!(err.contains("closed"), "{err}");
+}

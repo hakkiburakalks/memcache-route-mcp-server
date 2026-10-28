@@ -82,6 +82,9 @@ fn next_random(state: &mut u64) -> u64 {
 pub struct Client {
     io: BufReader<TcpStream>,
     op_timeout: Duration,
+    /// Set after a failed read: the rest of the reply may still be on the wire, so the next
+    /// command would read it as its own answer.
+    broken: bool,
 }
 
 impl Client {
@@ -93,10 +96,14 @@ impl Client {
         Ok(Self {
             io: BufReader::new(stream),
             op_timeout,
+            broken: false,
         })
     }
 
     async fn send(&mut self, bytes: &[u8]) -> Result<(), ClientError> {
+        if self.broken {
+            return Err(ClientError::Closed);
+        }
         timeout(self.op_timeout, self.io.get_mut().write_all(bytes))
             .await
             .map_err(|_| ClientError::Timeout)??;
@@ -104,6 +111,14 @@ impl Client {
     }
 
     async fn line(&mut self) -> Result<String, ClientError> {
+        let r = self.read_line().await;
+        if r.is_err() {
+            self.broken = true;
+        }
+        r
+    }
+
+    async fn read_line(&mut self) -> Result<String, ClientError> {
         let mut buf = String::new();
         let n = timeout(
             self.op_timeout,
@@ -140,6 +155,7 @@ impl Client {
             let l = self.line().await?;
             lines += 1;
             if lines > MAX_STAT_LINES {
+                self.broken = true;
                 return Err(ProtocolError::Malformed("too many stat lines".to_owned()).into());
             }
             match text::parse_stat_line(&l)? {
