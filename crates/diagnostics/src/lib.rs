@@ -12,6 +12,12 @@ pub type Stats = BTreeMap<String, String>;
 /// Item-count outliers are only reported when the larger of the two counts reaches this.
 const MIN_ITEMS_FOR_OUTLIER: u64 = 100;
 
+/// Average evictions per second (since start) below which they are only noted, not warned about.
+const EVICTIONS_QUIET_PER_SEC: f64 = 0.01;
+
+/// Average evictions per second (since start) from which a nearly full node is critical.
+const EVICTIONS_BUSY_PER_SEC: f64 = 1.0;
+
 /// Below this many gets the hit ratio says little.
 const MIN_GETS_FOR_RATIO: u64 = 1_000;
 
@@ -102,21 +108,44 @@ fn check_memory(stats: &Stats, out: &mut Vec<Finding>) {
     let pct = used as f64 / limit as f64 * 100.0;
     let evictions = num(stats, "evictions").unwrap_or(0);
     if evictions > 0 {
-        let sev = if pct >= 90.0 {
-            Severity::Critical
-        } else {
-            Severity::Warning
+        // The counter runs since start, so a long-lived node that evicted a few items long ago
+        // would look unhealthy forever. The average rate over the uptime tells the two apart.
+        let rate = num(stats, "uptime").map(|up| evictions as f64 / up.max(1) as f64);
+        let (sev, how_long) = match rate {
+            Some(r) if r < EVICTIONS_QUIET_PER_SEC => (
+                Severity::Info,
+                format!(" (about {:.1}/hour on average)", r * 3600.0),
+            ),
+            Some(r) => (
+                if pct >= 90.0 && r >= EVICTIONS_BUSY_PER_SEC {
+                    Severity::Critical
+                } else {
+                    Severity::Warning
+                },
+                format!(" (about {:.1}/s on average)", r),
+            ),
+            None => (
+                if pct >= 90.0 {
+                    Severity::Critical
+                } else {
+                    Severity::Warning
+                },
+                String::new(),
+            ),
         };
         out.push(finding(
             sev,
             "evictions",
-            format!("{evictions} items evicted before expiry; memory {pct:.1}% of limit"),
+            format!(
+                "{evictions} items evicted before expiry since start{how_long}; memory {pct:.1}% of limit"
+            ),
         ));
     } else if pct >= 90.0 {
+        // A full cache is how memcached is meant to run; it only matters once items get evicted.
         out.push(finding(
-            Severity::Warning,
+            Severity::Info,
             "memory_near_limit",
-            format!("memory {pct:.1}% of limit"),
+            format!("memory {pct:.1}% of limit; evictions will start if more data arrives"),
         ));
     }
 }
@@ -126,7 +155,7 @@ fn check_connections(stats: &Stats, settings: &Stats, out: &mut Vec<Finding>) {
         out.push(finding(
             Severity::Critical,
             "connection_limit_hit",
-            "listen_disabled_num > 0: the server stopped accepting connections at its limit".into(),
+            "listen_disabled_num > 0: the server stopped accepting connections at its limit at least once since start".into(),
         ));
     }
     if let (Some(cur), Some(max)) = (num(stats, "curr_connections"), num(settings, "maxconns")) {
@@ -305,6 +334,37 @@ mod tests {
         assert_eq!(
             (f[0].code, f[0].severity),
             ("evictions", Severity::Critical)
+        );
+    }
+
+    #[test]
+    fn old_evictions_on_a_long_lived_node_are_only_noted() {
+        let none = Stats::new();
+        // 12 evictions in 30 days.
+        let s = st(&[
+            ("bytes", "95"),
+            ("limit_maxbytes", "100"),
+            ("evictions", "12"),
+            ("uptime", "2592000"),
+        ]);
+        let f = analyze_node(&s, &none, &none);
+        assert_eq!((f[0].code, f[0].severity), ("evictions", Severity::Info));
+        // 5 per second on average is not.
+        let busy = st(&[
+            ("bytes", "95"),
+            ("limit_maxbytes", "100"),
+            ("evictions", "5000"),
+            ("uptime", "1000"),
+        ]);
+        assert_eq!(
+            analyze_node(&busy, &none, &none)[0].severity,
+            Severity::Critical
+        );
+        // A full cache without evictions is normal.
+        let full = st(&[("bytes", "95"), ("limit_maxbytes", "100")]);
+        assert_eq!(
+            analyze_node(&full, &none, &none)[0].severity,
+            Severity::Info
         );
     }
 
