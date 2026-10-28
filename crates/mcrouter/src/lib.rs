@@ -26,7 +26,8 @@ pub struct ConfigSummary {
     pub pools: Vec<Pool>,
     /// Pool names the route tree refers to (`PoolRoute|name` or `"pool": "name"`).
     pub referenced_pools: Vec<String>,
-    /// Whether any route handle in the tree is a failover handle (`FailoverRoute`, ...).
+    /// Whether any route handle in the tree is a failover handle (`FailoverRoute`, ...). Only
+    /// presence is known, not which keys or operations it covers.
     pub has_failover: bool,
 }
 
@@ -230,7 +231,7 @@ pub fn diagnose_failover(cfg: &ConfigSummary, stats: &BTreeMap<String, String>) 
             out.push(finding(
                 Severity::Warning,
                 "failover_active",
-                format!("{down} of {total} destinations are down; the route has a failover handle, so their keys should be served by the fallback"),
+                format!("{down} of {total} destinations are down; the route mentions a failover handle, so their keys should be served by the fallback if it covers them (this check only sees that Failover appears somewhere in the config, not which keys or operations it protects)"),
             ));
             if total > 0 && down * 2 >= total {
                 out.push(finding(
