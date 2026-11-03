@@ -1,6 +1,9 @@
 //! Behaviour of two mcrouters (tests/compat/docker-compose.yml) while `mc-a` is stopped.
 //! Set MCROUTER_PLAIN_ADDR (plain PoolRoute over mc-a, mc-b) and MCROUTER_FAILOVER_ADDR
 //! (FailoverRoute mc-a -> mc-b), then stop mc-a. Skipped otherwise.
+//!
+//! A failed store retires the client connection (fail-closed), so this test reconnects before
+//! each follow-up read. It never retries the failed write.
 
 use std::time::Duration;
 
@@ -30,13 +33,19 @@ async fn dead_destination_with_and_without_failover() {
         return;
     };
     let mut p = Client::connect(&plain, SLOW).await.unwrap();
-    let mut f = Client::connect(&failover, SLOW).await.unwrap();
 
     // Provoke the plain router until it has marked mc-a down, then find a key that hashes there.
     let mut victim = None;
     for i in 0..200 {
         let key = format!("failover-test:{i}");
-        let _ = p.store(StoreCmd::Set, key.as_bytes(), 0, 60, b"x").await;
+        if p.store(StoreCmd::Set, key.as_bytes(), 0, 60, b"x")
+            .await
+            .is_err()
+        {
+            // A failed store retires the connection (fail-closed). Reconnect before probing;
+            // this is not a retry of the failed write.
+            p = Client::connect(&plain, SLOW).await.unwrap();
+        }
         if trace(&mut p, &key).await == RouteTrace::NoDestination {
             victim = Some(key);
             break;
@@ -45,14 +54,18 @@ async fn dead_destination_with_and_without_failover() {
     let key = victim.expect("no key hashed to the stopped destination; is mc-a stopped?");
 
     // Plain pool: writes fail loudly, reads look like a miss.
+    p = Client::connect(&plain, SLOW).await.unwrap();
     let write = p.store(StoreCmd::Set, key.as_bytes(), 0, 60, b"x").await;
     assert!(
         matches!(write, Err(ClientError::Protocol(ProtocolError::Server(_)))),
         "expected SERVER_ERROR, got {write:?}"
     );
+    // That SERVER_ERROR retires the connection; use a fresh one for the read.
+    p = Client::connect(&plain, SLOW).await.unwrap();
     assert_eq!(p.get(key.as_bytes()).await.unwrap(), None);
 
     // The same key through the failover route is stored on the backup.
+    let mut f = Client::connect(&failover, SLOW).await.unwrap();
     let write = f
         .store(StoreCmd::Set, key.as_bytes(), 0, 60, b"x")
         .await

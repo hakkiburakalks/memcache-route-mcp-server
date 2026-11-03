@@ -1,5 +1,7 @@
 //! ASCII (text) protocol: request encoding and response parsing.
 
+use std::collections::BTreeSet;
+
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -177,14 +179,18 @@ pub fn parse_meta_get(line: &str) -> Result<MetaGet, ProtocolError> {
         return Ok(MetaGet::Miss);
     }
     if line == "HD" || line.starts_with("HD ") {
-        let flags = line
-            .split(' ')
-            .skip(1)
-            .filter_map(|t| {
-                let mut ch = t.chars();
-                ch.next().map(|c| (c, ch.as_str().to_owned()))
-            })
-            .collect();
+        let mut seen = BTreeSet::new();
+        let mut flags = Vec::new();
+        for token in line.split(' ').skip(1).filter(|t| !t.is_empty()) {
+            let mut ch = token.chars();
+            let Some(flag) = ch.next() else {
+                continue;
+            };
+            if !seen.insert(flag) {
+                return Err(ProtocolError::Malformed(line.to_owned()));
+            }
+            flags.push((flag, ch.as_str().to_owned()));
+        }
         return Ok(MetaGet::Hit(flags));
     }
     if line.starts_with("ERROR")
@@ -260,21 +266,38 @@ pub fn parse_dump_line(line: &str) -> Result<DumpLine, ProtocolError> {
     let bad = || ProtocolError::Malformed(line.to_owned());
     let (mut key, mut exp, mut la, mut fetch, mut size, mut cls) =
         (None, None, None, None, None, None);
+    let mut seen = BTreeSet::new();
     for token in line.split(' ').filter(|t| !t.is_empty()) {
         let (k, v) = token.split_once('=').ok_or_else(bad)?;
+        if !seen.insert(k) {
+            return Err(bad());
+        }
         match k {
             "key" => key = Some(percent_decode(v)),
             "exp" => exp = Some(v.parse::<i64>().map_err(|_| bad())?),
             "la" => la = Some(v.parse::<u64>().map_err(|_| bad())?),
-            "fetch" => fetch = Some(v == "yes"),
+            "fetch" => match v {
+                "yes" => fetch = Some(true),
+                "no" => fetch = Some(false),
+                _ => return Err(bad()),
+            },
             "size" => size = Some(v.parse::<u64>().map_err(|_| bad())?),
             "cls" => cls = Some(v.parse::<u32>().map_err(|_| bad())?),
             _ => {} // cas, flags and fields added by later versions
         }
     }
+    let key = key.ok_or_else(bad)?;
+    if key.is_empty() {
+        return Err(bad());
+    }
+    validate_key(key.as_bytes())?;
+    let exp = exp.ok_or_else(bad)?;
+    if exp < -1 {
+        return Err(bad());
+    }
     Ok(DumpLine::Entry(DumpEntry {
-        key: key.ok_or_else(bad)?,
-        expires_at: exp.ok_or_else(bad)?.try_into().ok(),
+        key,
+        expires_at: (exp >= 0).then_some(exp as u64),
         last_access: la.ok_or_else(bad)?,
         fetched: fetch.ok_or_else(bad)?,
         size: size.ok_or_else(bad)?,
@@ -336,7 +359,11 @@ pub fn parse_value_header(line: &str) -> Result<Option<ValueHeader>, ProtocolErr
     }
     let bad = || ProtocolError::Malformed(line.to_owned());
     let mut parts = line.strip_prefix("VALUE ").ok_or_else(bad)?.split(' ');
-    let key = parts.next().ok_or_else(bad)?.to_owned();
+    let key = parts.next().ok_or_else(bad)?;
+    if key.is_empty() {
+        return Err(bad());
+    }
+    validate_key(key.as_bytes())?;
     let flags = parts.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
     let len = parts.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
     let cas = parts
@@ -344,8 +371,11 @@ pub fn parse_value_header(line: &str) -> Result<Option<ValueHeader>, ProtocolErr
         .map(|c| c.parse())
         .transpose()
         .map_err(|_| bad())?;
+    if parts.next().is_some() {
+        return Err(bad());
+    }
     Ok(Some(ValueHeader {
-        key,
+        key: key.to_owned(),
         flags,
         len,
         cas,
@@ -359,10 +389,13 @@ pub fn parse_stat_line(line: &str) -> Result<Option<(&str, &str)>, ProtocolError
         return Ok(None);
     }
     if let Some(rest) = line.strip_prefix("STAT ") {
-        return rest
+        let (name, value) = rest
             .split_once(' ')
-            .map(Some)
-            .ok_or_else(|| ProtocolError::Malformed(line.to_owned()));
+            .ok_or_else(|| ProtocolError::Malformed(line.to_owned()))?;
+        if name.is_empty() {
+            return Err(ProtocolError::Malformed(line.to_owned()));
+        }
+        return Ok(Some((name, value)));
     }
     if line.starts_with("ERROR")
         || line.starts_with("SERVER_ERROR")
@@ -552,5 +585,17 @@ mod tests {
         );
         assert_eq!(parse_value_header("END\r\n").unwrap(), None);
         assert!(parse_value_header("VALUE k x 1\r\n").is_err());
+        assert!(parse_value_header("VALUE k 0 1 extra\r\n").is_err());
+        assert!(parse_value_header("VALUE  0 1\r\n").is_err());
+    }
+
+    #[test]
+    fn strict_dump_and_meta_parsing() {
+        assert!(parse_dump_line("key= exp=-1 la=1 fetch=no cls=1 size=1").is_err());
+        assert!(parse_dump_line("key=k exp=-2 la=1 fetch=no cls=1 size=1").is_err());
+        assert!(parse_dump_line("key=k exp=-1 la=1 fetch=maybe cls=1 size=1").is_err());
+        assert!(parse_dump_line("key=k exp=-1 exp=2 la=1 fetch=no cls=1 size=1").is_err());
+        assert!(parse_meta_get("HD s5 s6").is_err());
+        assert!(parse_stat_line("STAT  value\r\n").is_err());
     }
 }

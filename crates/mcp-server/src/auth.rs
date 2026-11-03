@@ -5,7 +5,7 @@
 //! These permissions sit inside the server-wide switches (`MEMCACHED_MCP_ALLOW_WRITE`, ...):
 //! an action needs both.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -239,6 +239,14 @@ impl TokenStore {
 
     pub fn len(&self) -> usize {
         self.users.len()
+    }
+
+    /// Account names and token hashes, used to close sessions when a user is removed or rotated.
+    pub fn account_hashes(&self) -> HashMap<String, String> {
+        self.users
+            .iter()
+            .map(|e| (e.identity.name.to_string(), e.hash.clone()))
+            .collect()
     }
 }
 

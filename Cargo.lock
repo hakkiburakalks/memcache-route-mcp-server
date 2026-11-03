@@ -218,9 +218,10 @@ dependencies = [
 
 [[package]]
 name = "diagnostics"
-version = "0.1.0"
+version = "0.1.0-alpha.9"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -544,11 +545,13 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp-server"
-version = "0.1.0"
+version = "0.1.0-alpha.9"
 dependencies = [
  "axum",
  "diagnostics",
  "getrandom",
+ "http-body",
+ "http-body-util",
  "mcrouter",
  "memcached-core",
  "memcached-protocol",
@@ -562,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "mcrouter"
-version = "0.1.0"
+version = "0.1.0-alpha.9"
 dependencies = [
  "diagnostics",
  "memcached-core",
@@ -574,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "memcached-core"
-version = "0.1.0"
+version = "0.1.0-alpha.9"
 dependencies = [
  "diagnostics",
  "memcached-protocol",
@@ -585,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "memcached-protocol"
-version = "0.1.0"
+version = "0.1.0-alpha.9"
 dependencies = [
  "thiserror",
 ]

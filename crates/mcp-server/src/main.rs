@@ -3,10 +3,11 @@
 mod audit;
 mod auth;
 mod http;
+mod target;
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use audit::Audit;
 use auth::{Identity, Perm};
@@ -31,6 +32,59 @@ const MAX_COMPARE_NODES: usize = 256;
 /// Connections a multi-node tool keeps open at once, so a big cluster is read in parallel without
 /// opening hundreds of connections together.
 const PARALLEL_FETCHES: usize = 16;
+
+/// RCA output is intentionally small: a bounded number of findings and clipped evidence.
+const RCA_JSON_LIMIT: usize = 256 * 1024;
+/// Destinations one mcrouter RCA call may probe. This reuses the same bound as compare_nodes.
+const MAX_RCA_DESTINATIONS: usize = 256;
+/// Bound for mcrouter tool responses that include config/compare derived data.
+const MCROUTER_JSON_LIMIT: usize = 512 * 1024;
+/// Cluster topology can contain up to 32 routers, 512 destinations and 128 backends.
+const CLUSTER_JSON_LIMIT: usize = 1024 * 1024;
+/// Efficiency advice is deliberately compact: bounded findings, evidence and recommendations.
+const ADVISOR_JSON_LIMIT: usize = 256 * 1024;
+/// Safe remediation advice is derived from bounded input and emits bounded prose.
+const REMEDIATION_JSON_LIMIT: usize = 256 * 1024;
+/// Historical analysis is bounded independently of the individual snapshot limit.
+const HISTORY_JSON_LIMIT: usize = 256 * 1024;
+const DEFAULT_TOOL_DEADLINE: Duration = Duration::from_secs(65);
+const DEFAULT_MULTI_TOOL_DEADLINE: Duration = Duration::from_secs(120);
+
+/// A test/deployment override for one tool class. Invalid values fall back to the safe default.
+fn tool_deadline(multi_node: bool) -> Duration {
+    let (name, default) = if multi_node {
+        (
+            "MEMCACHED_MCP_MULTI_TOOL_TIMEOUT_MS",
+            DEFAULT_MULTI_TOOL_DEADLINE,
+        )
+    } else {
+        ("MEMCACHED_MCP_TOOL_TIMEOUT_MS", DEFAULT_TOOL_DEADLINE)
+    };
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+}
+
+macro_rules! bounded_tool {
+    ($deadline:expr, $label:literal, $body:block) => {
+        match tokio::time::timeout($deadline, async $body).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("{} exceeded the {:?} deadline", $label, $deadline)),
+        }
+    };
+}
+/// Snapshot output is larger than a bare RCA report because it includes selected metrics.
+const SNAPSHOT_JSON_LIMIT: usize = diagnostics::snapshot::MAX_SNAPSHOT_JSON_BYTES;
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
 
 #[derive(Clone)]
 struct MemcachedServer {
@@ -66,10 +120,41 @@ struct CompareArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct CompareSnapshotsArgs {
+    /// A snapshot object previously returned by a capture tool.
+    before: serde_json::Value,
+    /// A snapshot object previously returned by a capture tool.
+    after: serde_json::Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ClusterArgs {
+    /// Explicitly configured, allowlisted mcrouter addresses. No discovery or network scanning.
+    routers: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RemediationArgs {
+    /// An existing RCA, cache-efficiency, cluster-topology or snapshot/compatible JSON report.
+    #[serde(default)]
+    report: Option<serde_json::Value>,
+    /// An array of existing diagnostic finding objects, as an alternative to `report`.
+    #[serde(default)]
+    findings: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct HistoryArgs {
+    /// User-captured snapshots in any order; schema-versioned and bounded.
+    snapshots: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct TraceArgs {
     /// mcrouter address as `host:port`; must be in the allowlist.
     addr: String,
-    /// Key to trace.
+    /// Key to trace. Must not contain comma, parentheses, backslash, whitespace or control
+    /// characters, and the generated mcrouter probe must fit memcached's 250-byte key limit.
     key: String,
     /// Operation: `get` (default), `set` or `delete`.
     op: Option<String>,
@@ -87,12 +172,16 @@ impl MemcachedServer {
     /// Write tools are only registered when `MEMCACHED_MCP_ALLOW_WRITE=1`; otherwise they are
     /// neither listed nor callable.
     fn from_env() -> std::io::Result<Self> {
-        let allowlist = std::env::var("MEMCACHED_MCP_ALLOWLIST")
+        let allowlist: HashSet<String> = std::env::var("MEMCACHED_MCP_ALLOWLIST")
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .collect();
+        for entry in &allowlist {
+            target::validate_allowlist_entry(entry)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        }
         let write_prefixes = std::env::var("MEMCACHED_MCP_WRITE_PREFIX")
             .unwrap_or_default()
             .split(',')
@@ -149,20 +238,25 @@ impl MemcachedServer {
         })
     }
 
-    fn check_allowed(&self, who: &Identity, addr: &str) -> Result<(), String> {
+    fn check_allowed_quiet(&self, addr: &str) -> Result<(), String> {
         if !self.allowlist.contains(addr) {
-            self.audit
-                .record(&who.name, "connect", addr, None, "denied: not in allowlist");
             return Err(format!("{addr} is not in MEMCACHED_MCP_ALLOWLIST"));
         }
         Ok(())
     }
 
+    fn check_allowed(&self, who: &Identity, addr: &str) -> Result<(), String> {
+        let result = self.check_allowed_quiet(addr);
+        if result.is_err() {
+            self.audit
+                .record(&who.name, "connect", addr, None, "denied: not in allowlist");
+        }
+        result
+    }
+
     async fn connect(&self, who: &Identity, addr: &str) -> Result<Client, String> {
         self.check_allowed(who, addr)?;
-        Client::connect(addr, OP_TIMEOUT)
-            .await
-            .map_err(|e| e.to_string())
+        target::open(addr, OP_TIMEOUT).await
     }
 }
 
@@ -193,17 +287,132 @@ where
 }
 
 /// `stats`, `stats items` and `stats settings` of one node over a single connection. The last two
-/// are optional: older servers may lack them, and the rules that need them are skipped.
+/// are optional: older servers may lack them, and the rules that need them are skipped. The
+/// returned guards keep the reply-buffer reservations alive while the maps are compared and
+/// serialized, after the connection itself has dropped.
 async fn fetch_node(
     addr: String,
-) -> Result<(diagnostics::Stats, diagnostics::Stats, diagnostics::Stats), String> {
-    let mut c = Client::connect(&addr, OP_TIMEOUT)
-        .await
-        .map_err(|e| e.to_string())?;
+) -> Result<
+    (
+        diagnostics::Stats,
+        diagnostics::Stats,
+        diagnostics::Stats,
+        Vec<memcached_core::MemoryReservation>,
+    ),
+    String,
+> {
+    let mut c = target::open(&addr, OP_TIMEOUT).await?;
     let stats = c.stats(None).await.map_err(|e| e.to_string())?;
     let items = c.stats(Some("items")).await.unwrap_or_default();
     let settings = c.stats(Some("settings")).await.unwrap_or_default();
-    Ok((stats, items, settings))
+    let guards = c.take_memory_guards();
+    Ok((stats, items, settings, guards))
+}
+
+/// Reads the running config and stats from one mcrouter connection, then releases the connection
+/// while keeping the reply reservations alive for the caller's analysis/serialization.
+async fn fetch_mcrouter_rca_snapshot(
+    addr: &str,
+) -> Result<
+    (
+        mcrouter::ConfigSummary,
+        diagnostics::Stats,
+        Vec<memcached_core::MemoryReservation>,
+    ),
+    String,
+> {
+    let mut c = target::open(addr, OP_TIMEOUT).await?;
+    let (_, raw) = c
+        .get(mcrouter::CONFIG_KEY.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("server returned no config; is this an mcrouter?")?;
+    let text = String::from_utf8(raw).map_err(|e| e.to_string())?;
+    let cfg = mcrouter::parse_config(&text)?;
+    let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+    let guards = c.take_memory_guards();
+    Ok((cfg, stats, guards))
+}
+
+impl MemcachedServer {
+    /// Probes the configured destinations for the mcrouter RCA tool. This is the same bounded
+    /// fan-out used by `mcrouter_compare_destinations`; it does not exceed the upstream budget.
+    async fn rca_destinations(
+        &self,
+        who: &Identity,
+        cfg: &mcrouter::ConfigSummary,
+    ) -> (
+        Vec<mcrouter::rca::DestinationObservation>,
+        diagnostics::rca::Coverage,
+        Vec<memcached_core::MemoryReservation>,
+    ) {
+        let all = mcrouter::destinations(cfg);
+        let configured = all.len();
+        let truncated = configured.saturating_sub(MAX_RCA_DESTINATIONS);
+        let mut unmapped = 0usize;
+        let mut denied = 0usize;
+        let mut targets = Vec::new();
+        for dest in all.into_iter().take(MAX_RCA_DESTINATIONS) {
+            let Some(real) = self.dest_map.get(&dest) else {
+                unmapped += 1;
+                continue;
+            };
+            match self.check_allowed_quiet(real) {
+                Ok(()) => targets.push((dest, real.clone())),
+                Err(_) => denied += 1,
+            }
+        }
+        if denied > 0 {
+            self.audit.record(
+                &who.name,
+                "mcrouter_diagnose_rca",
+                "-",
+                None,
+                &format!("denied {denied} destination address(es) not in allowlist"),
+            );
+        }
+        let probed = targets.len();
+        let fetched = fetch_parallel(targets.clone(), |(_, real)| async move {
+            fetch_node(real).await
+        })
+        .await;
+        let mut observations = Vec::with_capacity(targets.len());
+        let mut guards = Vec::new();
+        for ((dest, _), result) in targets.into_iter().zip(fetched) {
+            let id = mcrouter::snapshot::opaque_id(&dest);
+            match result {
+                Ok((stats, items, settings, held)) => {
+                    guards.extend(held);
+                    observations.push(mcrouter::rca::DestinationObservation {
+                        id,
+                        reachable: true,
+                        stats: Some(stats),
+                        items,
+                        settings,
+                    });
+                }
+                Err(_) => observations.push(mcrouter::rca::DestinationObservation {
+                    id,
+                    reachable: false,
+                    stats: None,
+                    items: diagnostics::Stats::new(),
+                    settings: diagnostics::Stats::new(),
+                }),
+            }
+        }
+        let reachable = observations.iter().filter(|o| o.reachable).count();
+        let coverage = diagnostics::rca::Coverage {
+            configured_destinations: configured,
+            probed_destinations: probed,
+            reachable_destinations: reachable,
+            unreachable_destinations: probed.saturating_sub(reachable),
+            unmapped_destinations: unmapped,
+            denied_destinations: denied,
+            truncated_destinations: truncated,
+            complete: unmapped == 0 && denied == 0 && truncated == 0 && probed == configured,
+        };
+        (observations, coverage, guards)
+    }
 }
 
 #[tool_router]
@@ -219,12 +428,14 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "server_info", &a.addr)?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let caps = c.probe().await.map_err(|e| e.to_string())?;
-        Ok(format!(
-            "version: {}\nmeta_commands: {}",
-            caps.version, caps.meta
-        ))
+        bounded_tool!(tool_deadline(false), "server_info", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let caps = c.probe().await.map_err(|e| e.to_string())?;
+            Ok(format!(
+                "version: {}\nmeta_commands: {}",
+                caps.version, caps.meta
+            ))
+        })
     }
 
     #[tool(
@@ -238,12 +449,17 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "get_stats", &a.addr)?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let stats = c
-            .stats(a.group.as_deref())
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())
+        bounded_tool!(tool_deadline(false), "get_stats", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let stats = c
+                .stats(a.group.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            // Reserve a bounded estimate of the pretty JSON before it is allocated. The client's
+            // guards cover the map itself; this covers the serialized copy while it is built.
+            let limit = stats_response_estimate(&stats);
+            bounded_json(&stats, limit)
+        })
     }
 
     #[tool(
@@ -257,33 +473,40 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "get_key_metadata", &a.addr)?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let caps = c.probe().await.map_err(|e| e.to_string())?;
-        let key = a.key.as_bytes();
-        // A server that advertises meta commands but answers `mg` unexpectedly (an unknown flag on
-        // an older 1.6) is read the classic way instead of failing.
-        let meta = if caps.meta {
-            match c.meta_info(key).await {
-                Ok(info) => Some(info),
-                Err(memcached_core::ClientError::Protocol(_)) => None,
-                Err(e) => return Err(e.to_string()),
-            }
-        } else {
-            None
-        };
-        let body = if let Some(info) = meta {
-            serde_json::json!({ "source": "meta", "found": info.is_some(), "info": info })
-        } else {
-            let hit = c.get(key).await.map_err(|e| e.to_string())?;
-            serde_json::json!({
-                "source": "classic",
-                "found": hit.is_some(),
-                "info": hit.map(|(flags, data)| serde_json::json!({
-                    "client_flags": flags, "size": data.len(),
-                })),
-            })
-        };
-        serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
+        bounded_tool!(tool_deadline(false), "get_key_metadata", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let caps = c.probe().await.map_err(|e| e.to_string())?;
+            let key = a.key.as_bytes();
+            // A server that advertises meta commands but answers `mg` unexpectedly (an unknown flag
+            // on an older 1.6) is read the classic way instead of failing.
+            let meta = if caps.meta {
+                match c.meta_info(key).await {
+                    Ok(info) => Some(info),
+                    Err(memcached_core::ClientError::Protocol(_)) => {
+                        // The meta reply was not understood. Never send the classic fallback on a
+                        // connection whose protocol state is suspect.
+                        c = self.connect(&who, &a.addr).await?;
+                        None
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            } else {
+                None
+            };
+            let body = if let Some(info) = meta {
+                serde_json::json!({ "source": "meta", "found": info.is_some(), "info": info })
+            } else {
+                let hit = c.get_metadata(key).await.map_err(|e| e.to_string())?;
+                serde_json::json!({
+                    "source": "classic",
+                    "found": hit.is_some(),
+                    "info": hit.map(|(flags, size)| serde_json::json!({
+                        "client_flags": flags, "size": size,
+                    })),
+                })
+            };
+            serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
+        })
     }
 
     #[tool(
@@ -297,13 +520,355 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "diagnose_node", &a.addr)?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let stats = c.stats(None).await.map_err(|e| e.to_string())?;
-        // Older servers may lack these groups; the rules that need them are skipped.
-        let items = c.stats(Some("items")).await.unwrap_or_default();
-        let settings = c.stats(Some("settings")).await.unwrap_or_default();
-        let findings = diagnostics::analyze_node(&stats, &items, &settings);
-        serde_json::to_string_pretty(&findings).map_err(|e| e.to_string())
+        bounded_tool!(tool_deadline(false), "diagnose_node", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+            // Older servers may lack these groups; the rules that need them are skipped.
+            let items = c.stats(Some("items")).await.unwrap_or_default();
+            let settings = c.stats(Some("settings")).await.unwrap_or_default();
+            let findings = diagnostics::analyze_node(&stats, &items, &settings);
+            serde_json::to_string_pretty(&findings).map_err(|e| e.to_string())
+        })
+    }
+
+    #[tool(
+        description = "Explain likely root causes for one memcached node using a single read-only stats/items/settings snapshot. Returns stable, versioned JSON (schema_version 1.0) with suspected_cause, severity, confidence, evidence, alternative_explanations and recommended_checks. Does not prove causation and does not infer trends.",
+        annotations(read_only_hint = true)
+    )]
+    async fn diagnose_node_rca(
+        &self,
+        Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "diagnose_node_rca", &a.addr)?;
+        let deadline = tool_deadline(false);
+        let result = tokio::time::timeout(deadline, async {
+            let (stats, items, settings, guards) = fetch_node(a.addr.clone()).await?;
+            let report = diagnostics::rca::analyze_node(&a.addr, &stats, &items, &settings);
+            let text = bounded_json(&report, RCA_JSON_LIMIT)?;
+            Ok::<_, String>((text, guards))
+        })
+        .await
+        .map_err(|_| format!("root-cause analysis exceeded the {deadline:?} deadline"))??;
+        Ok(result.0)
+    }
+
+    #[tool(
+        description = "Explain likely root causes for an mcrouter by correlating its running config, stats and reachable destination stats. Returns stable, versioned JSON (schema_version 1.0) with partial-coverage reporting. Requires MEMCACHED_MCP_DEST_MAP for backend probes; unmapped or denied destinations are reported as limited coverage. Read-only; no failover or configuration change is performed.",
+        annotations(read_only_hint = true)
+    )]
+    async fn mcrouter_diagnose_rca(
+        &self,
+        Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "mcrouter_diagnose_rca", &a.addr)?;
+        let deadline = tool_deadline(true);
+        let result = tokio::time::timeout(deadline, async {
+            let (cfg, router_stats, mut guards) = fetch_mcrouter_rca_snapshot(&a.addr).await?;
+            let (destinations, coverage, destination_guards) =
+                self.rca_destinations(&who, &cfg).await;
+            guards.extend(destination_guards);
+            let input = mcrouter::rca::McrouterRcaInput {
+                target: &a.addr,
+                config: &cfg,
+                router_stats: &router_stats,
+                destinations: &destinations,
+                coverage,
+            };
+            let report = mcrouter::rca::analyze_mcrouter(&input);
+            let text = bounded_json(&report, RCA_JSON_LIMIT)?;
+            Ok::<_, String>((text, guards))
+        })
+        .await
+        .map_err(|_| format!("root-cause analysis exceeded the {deadline:?} deadline"))??;
+        Ok(result.0)
+    }
+
+    #[tool(
+        description = "Advise on Memcached cache efficiency from one read-only stats/items/settings snapshot. Returns stable schema_version 1.0 JSON with overall_assessment, efficiency_findings, evidence, confidence, recommendations (rationale, expected benefit, risk, priority and suggested validation steps), missing_evidence and limitations. It never changes configuration and does not claim that adding RAM will fix eviction pressure without historical or capacity evidence.",
+        annotations(read_only_hint = true)
+    )]
+    async fn advise_cache_efficiency(
+        &self,
+        Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "advise_cache_efficiency", &a.addr)?;
+        let result = bounded_tool!(tool_deadline(false), "advise_cache_efficiency", {
+            let (stats, items, settings, guards) = fetch_node(a.addr.clone()).await?;
+            let report = diagnostics::advisor::advise_node(&a.addr, &stats, &items, &settings);
+            let text = bounded_json(&report, ADVISOR_JSON_LIMIT)?;
+            Ok::<_, String>((text, guards))
+        })?;
+        Ok(result.0)
+    }
+
+    #[tool(
+        description = "Translate existing RCA, cache-efficiency, cluster or snapshot findings into safe, read-only remediation guidance. Accepts a structured report object or a findings array; never accepts commands or scripts. Returns stable schema_version 1.0 JSON with issue, priority, recommended_action, rationale, supporting_evidence, confidence, potential_risks, validation_steps, rollback_considerations and requires_human_approval. No remediation is executed.",
+        annotations(read_only_hint = true)
+    )]
+    async fn advise_safe_remediation(
+        &self,
+        Parameters(a): Parameters<RemediationArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "advise_safe_remediation", "-")?;
+        let input = match (a.report, a.findings) {
+            (Some(_), Some(_)) => {
+                return Err("provide either report or findings, not both".to_owned())
+            }
+            (Some(report), None) => report,
+            (None, Some(findings)) => {
+                serde_json::json!({ "findings": findings })
+            }
+            (None, None) => {
+                return Err("provide a structured report or a findings array".to_owned())
+            }
+        };
+        let report = diagnostics::remediation::advise(&input)?;
+        bounded_json(&report, REMEDIATION_JSON_LIMIT)
+    }
+
+    #[tool(
+        description = "Analyze a user-supplied history of incident snapshots for deterministic, evidence-based anomalies: hit-ratio deterioration, eviction-rate change, memory/connection pressure, item-count changes, backend availability changes, resets/restarts and persistent RCA findings. Accepts snapshot objects only; makes no upstream connection, persists nothing and emits bounded schema_version 1.0 JSON.",
+        annotations(read_only_hint = true)
+    )]
+    async fn analyze_snapshot_history(
+        &self,
+        Parameters(a): Parameters<HistoryArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "analyze_snapshot_history", "-")?;
+        if a.snapshots.is_empty() {
+            return Err("analyze_snapshot_history needs at least one snapshot".to_owned());
+        }
+        if a.snapshots.len() > diagnostics::history::MAX_HISTORY_SNAPSHOTS {
+            return Err(format!(
+                "analyze_snapshot_history takes at most {} snapshots, got {}",
+                diagnostics::history::MAX_HISTORY_SNAPSHOTS,
+                a.snapshots.len()
+            ));
+        }
+        let encoded = serde_json::to_vec(&a.snapshots)
+            .map_err(|e| format!("cannot measure snapshot history: {e}"))?;
+        if encoded.len() > diagnostics::history::MAX_HISTORY_INPUT_BYTES {
+            return Err(format!(
+                "snapshot history is {} bytes; the limit is {}",
+                encoded.len(),
+                diagnostics::history::MAX_HISTORY_INPUT_BYTES
+            ));
+        }
+        let mut snapshots = Vec::with_capacity(a.snapshots.len());
+        for value in a.snapshots {
+            snapshots.push(diagnostics::snapshot::parse_snapshot(value)?);
+        }
+        let report = diagnostics::history::analyze_history(&snapshots)?;
+        bounded_json(&report, HISTORY_JSON_LIMIT)
+    }
+
+    #[tool(
+        description = "Build a deterministic, read-only cluster topology and health model from explicitly supplied, allowlisted mcrouter addresses and their running configs. Probes only destinations mapped through MEMCACHED_MCP_DEST_MAP and present in the allowlist; never scans the network. Returns stable schema_version 1.0 JSON with opaque pool/destination/backend IDs, coverage, findings and existing RCA evidence. No automatic remediation.",
+        annotations(read_only_hint = true)
+    )]
+    async fn analyze_cluster_topology(
+        &self,
+        Parameters(a): Parameters<ClusterArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(
+            &who,
+            Perm::Read,
+            "analyze_cluster_topology",
+            &a.routers.join(","),
+        )?;
+        if a.routers.is_empty() {
+            return Err("analyze_cluster_topology needs at least one router".to_owned());
+        }
+        if a.routers.len() > mcrouter::cluster::MAX_CLUSTER_ROUTERS {
+            return Err(format!(
+                "analyze_cluster_topology takes at most {} routers, got {}",
+                mcrouter::cluster::MAX_CLUSTER_ROUTERS,
+                a.routers.len()
+            ));
+        }
+        let mut seen = HashSet::new();
+        let mut routers = Vec::new();
+        for router in &a.routers {
+            if !seen.insert(router.clone()) {
+                continue;
+            }
+            self.check_allowed(&who, router)?;
+            routers.push(router.clone());
+        }
+
+        let result = bounded_tool!(tool_deadline(true), "analyze_cluster_topology", {
+            let fetched = fetch_parallel(routers.clone(), |addr| async move {
+                let result = fetch_mcrouter_rca_snapshot(&addr).await;
+                (addr, result)
+            })
+            .await;
+            let mut observations = Vec::with_capacity(fetched.len());
+            let mut guards = Vec::new();
+            for (address, result) in fetched {
+                match result {
+                    Ok((config, stats, held)) => {
+                        guards.extend(held);
+                        observations.push(mcrouter::cluster::RouterObservation {
+                            address,
+                            config: Some(config),
+                            stats: Some(stats),
+                        });
+                    }
+                    Err(_) => observations.push(mcrouter::cluster::RouterObservation {
+                        address,
+                        config: None,
+                        stats: None,
+                    }),
+                }
+            }
+
+            let (targets, truncated) =
+                mcrouter::cluster::backend_targets(&observations, &self.dest_map, &self.allowlist);
+            let fetched = fetch_parallel(targets.clone(), |addr| async move {
+                match fetch_node(addr.clone()).await {
+                    Ok((stats, items, settings, held)) => {
+                        let rca = diagnostics::rca::analyze_node(&addr, &stats, &items, &settings);
+                        (
+                            addr.clone(),
+                            mcrouter::cluster::BackendObservation {
+                                address: addr,
+                                reachable: true,
+                                rca: Some(rca),
+                            },
+                            held,
+                        )
+                    }
+                    Err(_) => (
+                        addr.clone(),
+                        mcrouter::cluster::BackendObservation {
+                            address: addr,
+                            reachable: false,
+                            rca: None,
+                        },
+                        Vec::new(),
+                    ),
+                }
+            })
+            .await;
+            let mut backends = Vec::with_capacity(fetched.len());
+            for (_, backend, held) in fetched {
+                guards.extend(held);
+                backends.push(backend);
+            }
+
+            let topology = mcrouter::cluster::analyze_cluster_with_truncation(
+                &observations,
+                &self.dest_map,
+                &self.allowlist,
+                &backends,
+                now_unix_ms(),
+                truncated,
+            );
+            let text = bounded_json(&topology, CLUSTER_JSON_LIMIT)?;
+            Ok::<_, String>((text, guards))
+        })?;
+        Ok(result.0)
+    }
+
+    #[tool(
+        description = "Capture a timestamped, bounded, read-only incident snapshot of one memcached node. Contains selected numeric counters/gauges/slab summaries and the existing RCA report; excludes keys, values, tokens and raw configuration. Store the returned JSON outside the server yourself.",
+        annotations(read_only_hint = true)
+    )]
+    async fn capture_node_snapshot(
+        &self,
+        Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "capture_node_snapshot", &a.addr)?;
+        let deadline = tool_deadline(false);
+        let result = tokio::time::timeout(deadline, async {
+            let (stats, items, settings, guards) = fetch_node(a.addr.clone()).await?;
+            let rca = diagnostics::rca::analyze_node(&a.addr, &stats, &items, &settings);
+            let snapshot = diagnostics::snapshot::IncidentSnapshot::node(
+                &a.addr,
+                now_unix_ms(),
+                &stats,
+                &items,
+                &settings,
+                rca,
+            );
+            let text = bounded_json(&snapshot, SNAPSHOT_JSON_LIMIT)?;
+            Ok::<_, String>((text, guards))
+        })
+        .await
+        .map_err(|_| format!("snapshot capture exceeded the {deadline:?} deadline"))??;
+        Ok(result.0)
+    }
+
+    #[tool(
+        description = "Capture a timestamped, bounded, read-only incident snapshot of an mcrouter: selected router metrics, opaque topology fingerprints, destination reachability and the existing RCA report. No raw config, pool names, destination names, keys or values are included. Requires MEMCACHED_MCP_DEST_MAP for backend observations; incomplete coverage is reported. Store the returned JSON outside the server yourself.",
+        annotations(read_only_hint = true)
+    )]
+    async fn capture_mcrouter_snapshot(
+        &self,
+        Parameters(a): Parameters<Target>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "capture_mcrouter_snapshot", &a.addr)?;
+        let deadline = tool_deadline(true);
+        let result = tokio::time::timeout(deadline, async {
+            let (cfg, router_stats, mut guards) = fetch_mcrouter_rca_snapshot(&a.addr).await?;
+            let (destinations, coverage, destination_guards) =
+                self.rca_destinations(&who, &cfg).await;
+            guards.extend(destination_guards);
+            let input = mcrouter::rca::McrouterRcaInput {
+                target: &a.addr,
+                config: &cfg,
+                router_stats: &router_stats,
+                destinations: &destinations,
+                coverage: coverage.clone(),
+            };
+            let rca = mcrouter::rca::analyze_mcrouter(&input);
+            let topology = mcrouter::snapshot::topology_snapshot(&cfg, &destinations, coverage);
+            let snapshot = diagnostics::snapshot::IncidentSnapshot::mcrouter(
+                &a.addr,
+                now_unix_ms(),
+                &router_stats,
+                topology,
+                rca,
+            );
+            let text = bounded_json(&snapshot, SNAPSHOT_JSON_LIMIT)?;
+            Ok::<_, String>((text, guards))
+        })
+        .await
+        .map_err(|_| format!("snapshot capture exceeded the {deadline:?} deadline"))??;
+        Ok(result.0)
+    }
+
+    #[tool(
+        description = "Compare two previously captured incident snapshots. Returns bounded, deterministic JSON with counter/gauge/derived changes, reset detection, topology and RCA changes, explicit missing evidence and limitations. Rates are only emitted for counters with valid increasing timestamps, an interval of at least 5 s and no detected reset. Read-only; accepts snapshot objects, not addresses.",
+        annotations(read_only_hint = true)
+    )]
+    async fn compare_incident_snapshots(
+        &self,
+        Parameters(a): Parameters<CompareSnapshotsArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let who = self.who(&ctx);
+        self.authorize(&who, Perm::Read, "compare_incident_snapshots", "-")?;
+        let before = diagnostics::snapshot::parse_snapshot(a.before)?;
+        let after = diagnostics::snapshot::parse_snapshot(a.after)?;
+        let diff = diagnostics::snapshot::compare_snapshots(&before, &after)?;
+        bounded_json(&diff, SNAPSHOT_JSON_LIMIT)
     }
 
     #[tool(
@@ -323,39 +888,54 @@ impl MemcachedServer {
                 a.addrs.len()
             ));
         }
-        let mut unreachable = Vec::new();
-        let mut allowed = Vec::new();
-        for addr in &a.addrs {
-            match self.check_allowed(&who, addr) {
-                Ok(()) => allowed.push(addr.clone()),
-                Err(e) => unreachable.push(format!("{addr}: {e}")),
+        bounded_tool!(tool_deadline(true), "compare_nodes", {
+            let mut unreachable = Vec::new();
+            let mut allowed = Vec::new();
+            let mut denied = 0usize;
+            for addr in &a.addrs {
+                match self.check_allowed_quiet(addr) {
+                    Ok(()) => allowed.push(addr.clone()),
+                    Err(e) => {
+                        denied += 1;
+                        unreachable.push(format!("{addr}: {e}"));
+                    }
+                }
             }
-        }
-        let fetched = fetch_parallel(allowed.clone(), |addr| async move {
-            // Only the plain stats are needed here.
-            let mut c = Client::connect(&addr, OP_TIMEOUT)
-                .await
-                .map_err(|e| e.to_string())?;
-            c.stats(None).await.map_err(|e| e.to_string())
+            if denied > 0 {
+                self.audit.record(
+                    &who.name,
+                    "compare_nodes",
+                    "-",
+                    None,
+                    &format!("denied {denied} address(es) not in allowlist"),
+                );
+            }
+            let fetched = fetch_parallel(allowed.clone(), |addr| async move {
+                // Only the plain stats are needed here.
+                let mut c = target::open(&addr, OP_TIMEOUT).await?;
+                let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+                let guards = c.take_memory_guards();
+                Ok::<_, String>((stats, guards))
+            })
+            .await;
+            let mut collected = Vec::new();
+            for (addr, res) in allowed.iter().zip(fetched) {
+                match res {
+                    Ok((stats, guards)) => collected.push((addr.as_str(), stats, guards)),
+                    Err(e) => unreachable.push(format!("{addr}: {e}")),
+                }
+            }
+            let nodes: Vec<_> = collected
+                .iter()
+                .map(|(name, stats, _)| diagnostics::NodeSummary { name, stats })
+                .collect();
+            let findings = diagnostics::compare_nodes(&nodes);
+            serde_json::to_string_pretty(&serde_json::json!({
+                "findings": findings,
+                "unreachable": unreachable,
+            }))
+            .map_err(|e| e.to_string())
         })
-        .await;
-        let mut collected = Vec::new();
-        for (addr, res) in allowed.iter().zip(fetched) {
-            match res {
-                Ok(s) => collected.push((addr.as_str(), s)),
-                Err(e) => unreachable.push(format!("{addr}: {e}")),
-            }
-        }
-        let nodes: Vec<_> = collected
-            .iter()
-            .map(|(name, stats)| diagnostics::NodeSummary { name, stats })
-            .collect();
-        let findings = diagnostics::compare_nodes(&nodes);
-        serde_json::to_string_pretty(&serde_json::json!({
-            "findings": findings,
-            "unreachable": unreachable,
-        }))
-        .map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -369,11 +949,16 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "mcrouter_get_stats", &a.addr)?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let stats = c.stats(None).await.map_err(|e| e.to_string())?;
-        let findings = mcrouter::analyze_stats(&stats);
-        serde_json::to_string_pretty(&serde_json::json!({ "findings": findings, "stats": stats }))
-            .map_err(|e| e.to_string())
+        bounded_tool!(tool_deadline(false), "mcrouter_get_stats", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+            let findings = mcrouter::analyze_stats(&stats);
+            let limit = stats_response_estimate(&stats).saturating_add(16 * 1024);
+            bounded_json(
+                &serde_json::json!({ "findings": findings, "stats": stats }),
+                limit,
+            )
+        })
     }
 
     #[tool(
@@ -387,17 +972,22 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "mcrouter_inspect_config", &a.addr)?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let (_, raw) = c
-            .get(mcrouter::CONFIG_KEY.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("server returned no config; is this an mcrouter?")?;
-        let text = String::from_utf8(raw).map_err(|e| e.to_string())?;
-        let cfg = mcrouter::parse_config(&text)?;
-        let findings = mcrouter::analyze_config(&cfg);
-        serde_json::to_string_pretty(&serde_json::json!({ "config": cfg, "findings": findings }))
-            .map_err(|e| e.to_string())
+        bounded_tool!(tool_deadline(false), "mcrouter_inspect_config", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let (_, raw) = c
+                .get(mcrouter::CONFIG_KEY.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("server returned no config; is this an mcrouter?")?;
+            let text = String::from_utf8(raw).map_err(|e| e.to_string())?;
+            let cfg = mcrouter::parse_config(&text)?;
+            let findings = mcrouter::analyze_config(&cfg);
+            let limit = mcrouter_response_estimate(&cfg);
+            bounded_json(
+                &serde_json::json!({ "config": cfg, "findings": findings }),
+                limit,
+            )
+        })
     }
 
     #[tool(
@@ -411,63 +1001,87 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "mcrouter_compare_destinations", &a.addr)?;
-        let mut router = self.connect(&who, &a.addr).await?;
-        let (_, raw) = router
-            .get(mcrouter::CONFIG_KEY.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("server returned no config; is this an mcrouter?")?;
-        let cfg = mcrouter::parse_config(&String::from_utf8(raw).map_err(|e| e.to_string())?)?;
+        bounded_tool!(tool_deadline(true), "mcrouter_compare_destinations", {
+            let mut router = self.connect(&who, &a.addr).await?;
+            let (_, raw) = router
+                .get(mcrouter::CONFIG_KEY.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("server returned no config; is this an mcrouter?")?;
+            let cfg = mcrouter::parse_config(&String::from_utf8(raw).map_err(|e| e.to_string())?)?;
 
-        let mut unmapped = Vec::new();
-        let mut unreachable = Vec::new();
-        let mut targets = Vec::new();
-        for dest in mcrouter::destinations(&cfg) {
-            let Some(real) = self.dest_map.get(&dest) else {
-                unmapped.push(dest);
-                continue;
-            };
-            match self.check_allowed(&who, real) {
-                Ok(()) => targets.push((dest, real.clone())),
-                Err(e) => unreachable.push(format!("{dest} -> {real}: {e}")),
+            let destinations = mcrouter::destinations(&cfg);
+            if destinations.len() > MAX_COMPARE_NODES {
+                return Err(format!(
+                "mcrouter config has {} destinations; this tool takes at most {MAX_COMPARE_NODES}",
+                destinations.len()
+            ));
             }
-        }
-        let fetched = fetch_parallel(targets.clone(), |(_, real)| fetch_node(real)).await;
-        let mut collected = Vec::new();
-        for ((dest, real), res) in targets.into_iter().zip(fetched) {
-            match res {
-                Ok(data) => collected.push((dest, data)),
-                Err(e) => unreachable.push(format!("{dest} -> {real}: {e}")),
+            let mut unmapped = Vec::new();
+            let mut unreachable = Vec::new();
+            let mut targets = Vec::new();
+            let mut denied = 0usize;
+            for dest in destinations {
+                let Some(real) = self.dest_map.get(&dest) else {
+                    unmapped.push(dest);
+                    continue;
+                };
+                match self.check_allowed_quiet(real) {
+                    Ok(()) => targets.push((dest, real.clone())),
+                    Err(e) => {
+                        denied += 1;
+                        unreachable.push(format!("{dest} -> {real}: {e}"));
+                    }
+                }
             }
-        }
+            if denied > 0 {
+                self.audit.record(
+                    &who.name,
+                    "mcrouter_compare_destinations",
+                    "-",
+                    None,
+                    &format!("denied {denied} destination address(es) not in allowlist"),
+                );
+            }
+            let fetched = fetch_parallel(targets.clone(), |(_, real)| fetch_node(real)).await;
+            let mut collected = Vec::new();
+            for ((dest, real), res) in targets.into_iter().zip(fetched) {
+                match res {
+                    Ok(data) => collected.push((dest, data)),
+                    Err(e) => unreachable.push(format!("{dest} -> {real}: {e}")),
+                }
+            }
 
-        // Servers of different pools serve different data, so each pool is compared on its own.
-        let mut comparison = BTreeMap::new();
-        for pool in &cfg.pools {
-            let nodes: Vec<_> = collected
+            // Servers of different pools serve different data, so each pool is compared on its own.
+            let mut comparison = BTreeMap::new();
+            for pool in &cfg.pools {
+                let nodes: Vec<_> = collected
+                    .iter()
+                    .filter(|(name, (_, _, _, _))| pool.servers.contains(name))
+                    .map(|(name, (stats, _, _, _))| diagnostics::NodeSummary { name, stats })
+                    .collect();
+                if !nodes.is_empty() {
+                    comparison.insert(pool.name.clone(), diagnostics::compare_nodes(&nodes));
+                }
+            }
+            let per_node: BTreeMap<_, _> = collected
                 .iter()
-                .filter(|(name, _)| pool.servers.contains(name))
-                .map(|(name, (stats, _, _))| diagnostics::NodeSummary { name, stats })
+                .map(|(name, (stats, items, settings, _))| {
+                    (name, diagnostics::analyze_node(stats, items, settings))
+                })
+                .filter(|(_, f)| !f.is_empty())
                 .collect();
-            if !nodes.is_empty() {
-                comparison.insert(pool.name.clone(), diagnostics::compare_nodes(&nodes));
-            }
-        }
-        let per_node: BTreeMap<_, _> = collected
-            .iter()
-            .map(|(name, (stats, items, settings))| {
-                (name, diagnostics::analyze_node(stats, items, settings))
-            })
-            .filter(|(_, f)| !f.is_empty())
-            .collect();
-        serde_json::to_string_pretty(&serde_json::json!({
-            "inspected": collected.iter().map(|(n, _)| n).collect::<Vec<_>>(),
-            "comparison": comparison,
-            "per_node": per_node,
-            "unmapped": unmapped,
-            "unreachable": unreachable,
-        }))
-        .map_err(|e| e.to_string())
+            bounded_json(
+                &serde_json::json!({
+                    "inspected": collected.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+                    "comparison": comparison,
+                    "per_node": per_node,
+                    "unmapped": unmapped,
+                    "unreachable": unreachable,
+                }),
+                MCROUTER_JSON_LIMIT,
+            )
+        })
     }
 
     #[tool(
@@ -481,24 +1095,30 @@ impl MemcachedServer {
     ) -> Result<String, String> {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Read, "mcrouter_diagnose_failover", &a.addr)?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let (_, raw) = c
-            .get(mcrouter::CONFIG_KEY.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("server returned no config; is this an mcrouter?")?;
-        let cfg = mcrouter::parse_config(&String::from_utf8(raw).map_err(|e| e.to_string())?)?;
-        let stats = c.stats(None).await.map_err(|e| e.to_string())?;
-        let findings = mcrouter::diagnose_failover(&cfg, &stats);
-        serde_json::to_string_pretty(&serde_json::json!({
-            "has_failover": cfg.has_failover,
-            "findings": findings,
-        }))
-        .map_err(|e| e.to_string())
+        bounded_tool!(tool_deadline(false), "mcrouter_diagnose_failover", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let (_, raw) = c
+                .get(mcrouter::CONFIG_KEY.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("server returned no config; is this an mcrouter?")?;
+            let cfg = mcrouter::parse_config(&String::from_utf8(raw).map_err(|e| e.to_string())?)?;
+            let stats = c.stats(None).await.map_err(|e| e.to_string())?;
+            let findings = mcrouter::diagnose_failover(&cfg, &stats);
+            bounded_json(
+                &serde_json::json!({
+                    "has_failover": cfg.has_failover,
+                    "failover_scope": cfg.failover_scope,
+                    "failover_confidence": cfg.failover_scope.confidence(),
+                    "findings": findings,
+                }),
+                64 * 1024,
+            )
+        })
     }
 
     #[tool(
-        description = "Ask mcrouter which destination server a key would be routed to for an operation (get, set or delete). Nothing is read or written.",
+        description = "Ask mcrouter which destination server a key would be routed to for an operation (get, set or delete). Nothing is read or written. The key must not contain route-expression delimiters (comma, parentheses, backslash) or whitespace, and the generated mcrouter probe must fit memcached's 250-byte key limit.",
         annotations(read_only_hint = true)
     )]
     async fn mcrouter_trace_key_route(
@@ -512,15 +1132,20 @@ impl MemcachedServer {
         if !matches!(op, "get" | "set" | "delete") {
             return Err(format!("op must be get, set or delete, got '{op}'"));
         }
-        let mut c = self.connect(&who, &a.addr).await?;
-        let probe = mcrouter::route_key(op, &a.key);
-        match c.get(probe.as_bytes()).await.map_err(|e| e.to_string())? {
-            Some((_, dest)) => Ok(match mcrouter::interpret_route(&dest) {
-                mcrouter::RouteTrace::Destination { address } => format!("destination: {address}"),
-                mcrouter::RouteTrace::NoDestination => "destination: none. The key hashes to a destination that is marked down and the route does not fail over: writes will fail and reads will look like misses.".to_owned(),
-            }),
-            None => Err("mcrouter returned no route; is this an mcrouter?".to_owned()),
-        }
+        mcrouter::validate_route_key(op, &a.key)?;
+        bounded_tool!(tool_deadline(false), "mcrouter_trace_key_route", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let probe = mcrouter::route_key(op, &a.key);
+            match c.get(probe.as_bytes()).await.map_err(|e| e.to_string())? {
+                Some((_, dest)) => Ok(match mcrouter::try_interpret_route(&dest)
+                    .map_err(|e| e.to_string())?
+                {
+                    mcrouter::RouteTrace::Destination { address } => format!("destination: {address}"),
+                    mcrouter::RouteTrace::NoDestination => "destination: none. The key hashes to a destination that is marked down and the route does not fail over: writes will fail and reads will look like misses.".to_owned(),
+                }),
+                None => Err("mcrouter returned no route; is this an mcrouter?".to_owned()),
+            }
+        })
     }
 }
 
@@ -576,7 +1201,7 @@ const UNIFORM_DEADLINE: Duration = Duration::from_secs(60);
 #[tool_router(router = inventory_router)]
 impl MemcachedServer {
     #[tool(
-        description = "Sample what is stored in a memcached by walking its LRU crawler metadata dump (values are never read). Returns items, bytes and never-fetched counts per key prefix, plus individual keys only if enabled. Imposes crawler load, scans in the crawler's order (a partial scan is biased) unless `uniform` is set, which reads the whole dump and returns estimates from a random sample (a full crawl, capped at 2 million items or 60 s), and needs the LRU crawler enabled (off by default on 1.4).",
+        description = "Sample what is stored in a memcached by walking its LRU crawler metadata dump (values are never read). Returns items, bytes and never-fetched counts per key prefix, plus individual keys only if enabled. Imposes crawler load, scans in the crawler's order (a partial scan is biased) unless `uniform` is set, which reads the whole dump and returns estimates from a random sample (a full crawl, capped at 2 million items, 64 MiB or 60 s), and needs the LRU crawler enabled (off by default on 1.4).",
         annotations(read_only_hint = true)
     )]
     async fn sample_keys(
@@ -601,117 +1226,119 @@ impl MemcachedServer {
         let max_keys = a.max_keys.unwrap_or(50).min(500);
 
         let uniform = a.uniform.unwrap_or(false);
-        let c = self.connect(&who, &a.addr).await?;
-        let explain = |e: memcached_core::ClientError| {
-            let msg = e.to_string();
-            if msg.contains("disabled") {
-                "the LRU crawler is disabled on this server; start memcached with `-o lru_crawler` to allow metadump".to_owned()
-            } else if msg.contains("ERROR") {
-                format!("this server does not support `lru_crawler metadump` ({msg})")
+        bounded_tool!(tool_deadline(true), "sample_keys", {
+            let c = self.connect(&who, &a.addr).await?;
+            let explain = |e: memcached_core::ClientError| {
+                let msg = e.to_string();
+                if msg.contains("disabled") {
+                    "the LRU crawler is disabled on this server; start memcached with `-o lru_crawler` to allow metadump".to_owned()
+                } else if msg.contains("ERROR") {
+                    format!("this server does not support `lru_crawler metadump` ({msg})")
+                } else {
+                    msg
+                }
+            };
+            // `seen` is how many items the server listed; the entries are all of them, or a uniform
+            // random subset when `uniform` is set.
+            let (sample, seen) = if uniform {
+                let u = c
+                    .sample_keys_uniform(scan, UNIFORM_MAX_READ, UNIFORM_DEADLINE)
+                    .await
+                    .map_err(explain)?;
+                let seen = u.seen as usize;
+                (
+                    memcached_core::KeySample {
+                        entries: u.entries,
+                        complete: u.complete,
+                    },
+                    seen,
+                )
             } else {
-                msg
-            }
-        };
-        // `seen` is how many items the server listed; the entries are all of them, or a uniform
-        // random subset when `uniform` is set.
-        let (sample, seen) = if uniform {
-            let u = c
-                .sample_keys_uniform(scan, UNIFORM_MAX_READ, UNIFORM_DEADLINE)
-                .await
-                .map_err(explain)?;
-            let seen = u.seen as usize;
-            (
-                memcached_core::KeySample {
-                    entries: u.entries,
-                    complete: u.complete,
-                },
-                seen,
-            )
-        } else {
-            let s = c.dump_keys(scan).await.map_err(explain)?;
-            let seen = s.entries.len();
-            (s, seen)
-        };
-        self.audit.record(
-            &who.name,
-            "sample_keys",
-            &a.addr,
-            None,
-            &format!(
-                "scanned={seen} complete={} uniform={uniform} names_returned={want_keys}",
-                sample.complete
-            ),
-        );
+                let s = c.dump_keys(scan).await.map_err(explain)?;
+                let seen = s.entries.len();
+                (s, seen)
+            };
+            self.audit.record(
+                &who.name,
+                "sample_keys",
+                &a.addr,
+                None,
+                &format!(
+                    "scanned={seen} complete={} uniform={uniform} names_returned={want_keys}",
+                    sample.complete
+                ),
+            );
 
-        let scanned = seen;
-        let kept: Vec<_> = sample
-            .entries
-            .iter()
-            .filter(|e| a.prefix.as_deref().is_none_or(|p| e.key.starts_with(p)))
-            .collect();
-        let mut prefixes = diagnostics::inventory::summarize(
-            kept.iter().map(|e| diagnostics::inventory::Item {
-                key: &e.key,
-                size: e.size,
-                fetched: e.fetched,
-            }),
-            delim,
-        );
-        // A complete uniform sample stands in for `seen` items: scale its totals up to estimates.
-        let estimated = uniform && sample.complete && !sample.entries.is_empty();
-        let factor = if estimated {
-            seen as f64 / sample.entries.len() as f64
-        } else {
-            1.0
-        };
-        if estimated {
-            diagnostics::inventory::scale(&mut prefixes, factor);
-        }
-        let never_fetched =
-            (kept.iter().filter(|e| !e.fetched).count() as f64 * factor).round() as u64;
-        let matched = (kept.len() as f64 * factor).round() as u64;
-        let keys: Vec<_> = if want_keys {
-            kept.iter()
-                .take(max_keys)
-                .map(|e| {
-                    serde_json::json!({
-                        "key": e.key, "size": e.size, "fetched": e.fetched,
-                        "expires_at": e.expires_at, "last_access": e.last_access,
+            let scanned = seen;
+            let kept: Vec<_> = sample
+                .entries
+                .iter()
+                .filter(|e| a.prefix.as_deref().is_none_or(|p| e.key.starts_with(p)))
+                .collect();
+            let mut prefixes = diagnostics::inventory::summarize(
+                kept.iter().map(|e| diagnostics::inventory::Item {
+                    key: &e.key,
+                    size: e.size,
+                    fetched: e.fetched,
+                }),
+                delim,
+            );
+            // A complete uniform sample stands in for `seen` items: scale its totals up to estimates.
+            let estimated = uniform && sample.complete && !sample.entries.is_empty();
+            let factor = if estimated {
+                seen as f64 / sample.entries.len() as f64
+            } else {
+                1.0
+            };
+            if estimated {
+                diagnostics::inventory::scale(&mut prefixes, factor);
+            }
+            let never_fetched =
+                (kept.iter().filter(|e| !e.fetched).count() as f64 * factor).round() as u64;
+            let matched = (kept.len() as f64 * factor).round() as u64;
+            let keys: Vec<_> = if want_keys {
+                kept.iter()
+                    .take(max_keys)
+                    .map(|e| {
+                        serde_json::json!({
+                            "key": e.key, "size": e.size, "fetched": e.fetched,
+                            "expires_at": e.expires_at, "last_access": e.last_access,
+                        })
                     })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let mut notes = vec![
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut notes = vec![
             "size is the item's total size including overhead, not the value length".to_owned(),
             "expires_at and last_access are unix times on the server's clock; last_access is updated lazily".to_owned(),
         ];
-        if estimated {
-            notes.push(format!(
+            if estimated {
+                notes.push(format!(
                 "estimates: totals come from a uniform random sample of {} of {seen} items, scaled up; small prefixes carry a large error",
                 sample.entries.len()
             ));
-        } else if uniform && !sample.complete {
-            notes.push(format!(
-                "the full scan was cut off after {seen} items (item or time limit), so this sample is only of the crawler's first items, not random across the cache"
+            } else if uniform && !sample.complete {
+                notes.push(format!(
+                "the full scan was cut off after {seen} items (item, byte or time limit), so this sample is only of the crawler's first items, not random across the cache"
             ));
-        } else if !sample.complete {
-            notes.push(format!(
+            } else if !sample.complete {
+                notes.push(format!(
                 "scan stopped after {scanned} items before reaching the end; the crawler does not visit items randomly, so these totals are not representative of the whole cache"
             ));
-        }
-        serde_json::to_string_pretty(&serde_json::json!({
-            "scanned": scanned,
-            "complete": sample.complete,
-            "estimated": estimated,
-            "matched": matched,
-            "never_fetched": never_fetched,
-            "prefixes": prefixes.iter().take(50).collect::<Vec<_>>(),
-            "keys": keys,
-            "notes": notes,
-        }))
-        .map_err(|e| e.to_string())
+            }
+            serde_json::to_string_pretty(&serde_json::json!({
+                "scanned": scanned,
+                "complete": sample.complete,
+                "estimated": estimated,
+                "matched": matched,
+                "never_fetched": never_fetched,
+                "prefixes": prefixes.iter().take(50).collect::<Vec<_>>(),
+                "keys": keys,
+                "notes": notes,
+            }))
+            .map_err(|e| e.to_string())
+        })
     }
 }
 
@@ -737,20 +1364,22 @@ impl MemcachedServer {
                 a.value.len()
             ));
         }
-        let mut c = self.connect(&who, &a.addr).await?;
-        let res = c
-            .store(
-                StoreCmd::Set,
-                a.key.as_bytes(),
-                a.flags.unwrap_or(0),
-                ttl,
-                a.value.as_bytes(),
-            )
-            .await
-            .map(|s| format!("{s:?}"))
-            .map_err(|e| e.to_string());
-        self.audit_result(&who, "set_key", &a.addr, &a.key, &res);
-        res
+        bounded_tool!(tool_deadline(false), "set_key", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let res = c
+                .store(
+                    StoreCmd::Set,
+                    a.key.as_bytes(),
+                    a.flags.unwrap_or(0),
+                    ttl,
+                    a.value.as_bytes(),
+                )
+                .await
+                .map(|s| format!("{s:?}"))
+                .map_err(|e| e.to_string());
+            self.audit_result(&who, "set_key", &a.addr, &a.key, &res);
+            res
+        })
     }
 
     #[tool(
@@ -765,14 +1394,16 @@ impl MemcachedServer {
         let who = self.who(&ctx);
         self.authorize(&who, Perm::Write, "delete_key", &a.addr)?;
         self.check_write_key(&who, &a.addr, &a.key, "delete_key")?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let res = c
-            .delete(a.key.as_bytes())
-            .await
-            .map(|s| format!("{s:?}"))
-            .map_err(|e| e.to_string());
-        self.audit_result(&who, "delete_key", &a.addr, &a.key, &res);
-        res
+        bounded_tool!(tool_deadline(false), "delete_key", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let res = c
+                .delete(a.key.as_bytes())
+                .await
+                .map(|s| format!("{s:?}"))
+                .map_err(|e| e.to_string());
+            self.audit_result(&who, "delete_key", &a.addr, &a.key, &res);
+            res
+        })
     }
 
     #[tool(
@@ -788,14 +1419,16 @@ impl MemcachedServer {
         self.authorize(&who, Perm::Write, "touch_key", &a.addr)?;
         self.check_write_key(&who, &a.addr, &a.key, "touch_key")?;
         check_ttl(a.ttl_seconds)?;
-        let mut c = self.connect(&who, &a.addr).await?;
-        let res = c
-            .touch(a.key.as_bytes(), a.ttl_seconds)
-            .await
-            .map(|s| format!("{s:?}"))
-            .map_err(|e| e.to_string());
-        self.audit_result(&who, "touch_key", &a.addr, &a.key, &res);
-        res
+        bounded_tool!(tool_deadline(false), "touch_key", {
+            let mut c = self.connect(&who, &a.addr).await?;
+            let res = c
+                .touch(a.key.as_bytes(), a.ttl_seconds)
+                .await
+                .map(|s| format!("{s:?}"))
+                .map_err(|e| e.to_string());
+            self.audit_result(&who, "touch_key", &a.addr, &a.key, &res);
+            res
+        })
     }
 }
 
@@ -842,7 +1475,7 @@ impl MemcachedServer {
     }
 }
 
-#[tool_handler(router = self.router, name = "memcached-mcp")]
+#[tool_handler(router = self.router, name = "memcache-route-mcp-server")]
 impl rmcp::ServerHandler for MemcachedServer {}
 
 #[tokio::main]
@@ -850,6 +1483,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("new-token") {
         return new_token_command().map_err(Into::into);
     }
+    let max_upstream = positive_env(
+        "MEMCACHED_MCP_MAX_UPSTREAM_CONNECTIONS",
+        target::DEFAULT_MAX_UPSTREAM_CONNECTIONS,
+    )?;
+    target::configure_upstream_limit(max_upstream)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let budget_mb = positive_env(
+        "MEMCACHED_MCP_MEMORY_BUDGET_MB",
+        memcached_core::memory::DEFAULT_BUDGET_BYTES / (1024 * 1024),
+    )?;
+    let budget_bytes = budget_mb
+        .checked_mul(1024 * 1024)
+        .ok_or("MEMCACHED_MCP_MEMORY_BUDGET_MB is too large")?;
+    memcached_core::memory::configure_global(budget_bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let mut server = MemcachedServer::from_env()?;
     if server.allowlist.is_empty() {
         eprintln!("warning: MEMCACHED_MCP_ALLOWLIST is empty; every target will be rejected");
@@ -1003,6 +1651,117 @@ fn new_token_command() -> Result<(), String> {
     Ok(())
 }
 
+/// A positive integer environment setting, or its default when unset.
+/// Reserves memory for a tool's serialized JSON before the allocation. This is an estimate, not
+/// an accounting of every byte the JSON-RPC transport later copies; exhaustion fails the tool
+/// call closed instead of overrunning the reservation budget.
+fn reserve_tool_response(
+    bytes: usize,
+) -> Result<Option<memcached_core::MemoryReservation>, String> {
+    match memcached_core::memory::global() {
+        Some(budget) => budget.try_reserve(bytes).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// A JSON sink that refuses to grow past the size that was reserved. The backing `Vec` is
+/// allocated with exactly `limit` bytes of capacity, so serialization cannot silently double the
+/// reservation through `String` growth.
+struct BoundedJson {
+    buf: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for BoundedJson {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let len = self
+            .buf
+            .len()
+            .checked_add(data.len())
+            .ok_or_else(|| std::io::Error::other("JSON size overflow"))?;
+        if len > self.limit {
+            return Err(std::io::Error::other(
+                "serialized JSON exceeded its reserved size",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_json<T: serde::Serialize>(value: &T, limit: usize) -> Result<String, String> {
+    let _reservation = reserve_tool_response(limit)?;
+    let mut writer = BoundedJson {
+        buf: Vec::with_capacity(limit),
+        limit,
+    };
+    serde_json::to_writer_pretty(&mut writer, value)
+        .map_err(|e| format!("serializing the tool response: {e}"))?;
+    String::from_utf8(writer.buf).map_err(|e| format!("tool response is not UTF-8: {e}"))
+}
+
+/// Pretty-printed JSON can be larger than the raw `STAT` key and value bytes. JSON string
+/// escaping of a control character is six bytes (`\u00XX`), quotes/backslashes are two, and
+/// pretty-printing adds indentation. Six times the map payload plus a fixed allowance is a
+/// deliberately conservative bound for the serialized copy.
+fn stats_response_estimate(stats: &diagnostics::Stats) -> usize {
+    let payload: usize = stats
+        .iter()
+        .map(|(k, v)| k.len().saturating_add(v.len()).saturating_add(16))
+        .sum();
+    payload.saturating_mul(6).saturating_add(4096)
+}
+
+fn mcrouter_response_estimate(cfg: &mcrouter::ConfigSummary) -> usize {
+    let payload: usize = cfg
+        .pools
+        .iter()
+        .map(|p| {
+            p.name
+                .len()
+                .saturating_add(p.servers.iter().map(String::len).sum::<usize>())
+                .saturating_add(32)
+        })
+        .sum();
+    payload
+        .saturating_mul(6)
+        .saturating_add(64 * 1024)
+        .min(MCROUTER_JSON_LIMIT)
+}
+
+fn positive_env(name: &str, default: usize) -> Result<usize, String> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(v) => v
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("{name} must be a positive integer, got '{v}'")),
+    }
+}
+
+/// A millisecond environment setting. `allow_zero` is used for cache TTL, where zero disables it.
+fn millis_env(name: &str, default: u64, allow_zero: bool) -> Result<Duration, String> {
+    match std::env::var(name) {
+        Err(_) => Ok(Duration::from_millis(default)),
+        Ok(v) => {
+            let ms = v
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| format!("{name} must be a non-negative integer, got '{v}'"))?;
+            if !allow_zero && ms == 0 {
+                return Err(format!("{name} must be greater than zero"));
+            }
+            Ok(Duration::from_millis(ms))
+        }
+    }
+}
+
 /// Authentication is mandatory over HTTP, and plaintext is only allowed on loopback unless
 /// explicitly opted into (the bearer token would otherwise cross the network in the clear).
 fn http_config(
@@ -1086,6 +1845,22 @@ fn http_config(
                 format!("MEMCACHED_MCP_HTTP_MAX_CONCURRENT must be a positive integer, got '{v}'")
             })?,
     };
+    let metrics_max_concurrent = positive_env(
+        "MEMCACHED_MCP_METRICS_MAX_CONCURRENT",
+        http::DEFAULT_METRICS_MAX_CONCURRENT,
+    )?;
+    let metrics_fanout =
+        positive_env("MEMCACHED_MCP_METRICS_FANOUT", http::DEFAULT_METRICS_FANOUT)?;
+    let metrics_deadline = millis_env(
+        "MEMCACHED_MCP_METRICS_TIMEOUT_MS",
+        http::DEFAULT_METRICS_DEADLINE.as_millis() as u64,
+        false,
+    )?;
+    let metrics_cache_ttl = millis_env(
+        "MEMCACHED_MCP_METRICS_CACHE_MS",
+        http::DEFAULT_METRICS_CACHE_TTL.as_millis() as u64,
+        true,
+    )?;
     Ok(http::HttpConfig {
         bind,
         tokens,
@@ -1095,5 +1870,66 @@ fn http_config(
         max_sessions,
         max_sessions_per_user,
         max_concurrent,
+        metrics_max_concurrent,
+        metrics_fanout,
+        metrics_deadline,
+        metrics_cache_ttl,
+        body_timeout: millis_env("MEMCACHED_MCP_HTTP_BODY_TIMEOUT_MS", 30_000, false)?,
     })
+}
+
+#[cfg(test)]
+mod memory_response_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_json_refuses_to_pass_its_reservation() {
+        let err = bounded_json(&"x".repeat(100), 16).unwrap_err();
+        assert!(err.contains("reserved size"), "{err}");
+    }
+
+    #[test]
+    fn stats_estimate_covers_worst_case_control_character_escaping() {
+        let mut stats = diagnostics::Stats::new();
+        stats.insert("k".to_owned(), "\u{1}".repeat(100));
+        let limit = stats_response_estimate(&stats);
+        let body = bounded_json(&stats, limit).unwrap();
+        assert!(body.contains("\\u0001"), "{body}");
+    }
+
+    #[test]
+    fn snapshot_serialization_is_bounded() {
+        let stats = diagnostics::Stats::new();
+        let rca = diagnostics::rca::analyze_node("cache:11211", &stats, &stats, &stats);
+        let snapshot = diagnostics::snapshot::IncidentSnapshot::node(
+            "cache:11211",
+            1,
+            &stats,
+            &stats,
+            &stats,
+            rca,
+        );
+        let text = bounded_json(&snapshot, SNAPSHOT_JSON_LIMIT).unwrap();
+        assert!(text.len() <= SNAPSHOT_JSON_LIMIT);
+        let err = bounded_json(&snapshot, 64).unwrap_err();
+        assert!(err.contains("reserved size"), "{err}");
+    }
+
+    #[test]
+    fn rca_report_serialization_is_bounded() {
+        let mut report = diagnostics::rca::RcaReport::new("memcached_node", "cache:11211");
+        for _ in 0..8 {
+            report.findings.push(diagnostics::rca::RcaFinding::new(
+                "test_rule",
+                "x".repeat(512),
+                diagnostics::Severity::Info,
+                diagnostics::rca::Confidence::Low,
+                "test basis",
+            ));
+        }
+        let text = bounded_json(&report, RCA_JSON_LIMIT).unwrap();
+        assert!(text.len() <= RCA_JSON_LIMIT);
+        let err = bounded_json(&report, 64).unwrap_err();
+        assert!(err.contains("reserved size"), "{err}");
+    }
 }

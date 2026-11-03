@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use memcached_core::Client;
+use memcached_protocol::text::StoreCmd;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -149,6 +150,23 @@ async fn uniform_sample_covers_the_whole_dump_not_just_its_start() {
 }
 
 #[tokio::test]
+async fn uniform_sample_keeps_at_most_the_sampling_limit() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(&dump_lines(100_001)).await;
+    })
+    .await;
+    let c = Client::connect(&addr, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let sample = c
+        .sample_keys_uniform(200_000, 1_000_000, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(sample.entries.len(), 100_000);
+    assert!(sample.complete);
+}
+
+#[tokio::test]
 async fn uniform_sample_reports_a_capped_scan_as_incomplete() {
     let addr = fake_server(|mut s| async move {
         let _ = s.write_all(&dump_lines(5_000)).await;
@@ -180,4 +198,229 @@ async fn connection_is_unusable_after_a_stalled_reply() {
     assert!(c.stats(Some("items")).await.is_err());
     let err = c.stats(Some("settings")).await.unwrap_err().to_string();
     assert!(err.contains("closed"), "{err}");
+}
+
+#[tokio::test]
+async fn stats_total_bytes_are_capped_and_connection_is_retired() {
+    let addr = fake_server(|mut s| async move {
+        for i in 0..20 {
+            let line = format!("STAT k{i} {}\r\n", "x".repeat(100));
+            if s.write_all(line.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c.stats_with_limit(None, 256).await.unwrap_err().to_string();
+    assert!(err.contains("byte limit"), "{err}");
+    let err = c.stats(None).await.unwrap_err().to_string();
+    assert!(err.contains("closed"), "connection was reused: {err}");
+}
+
+#[tokio::test]
+async fn malformed_stats_reply_retires_the_connection() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s
+            .write_all(b"STAT good 1\r\nNOT A STAT\r\nSTAT later 2\r\nEND\r\n")
+            .await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c.stats(None).await.unwrap_err().to_string();
+    assert!(err.contains("malformed"), "{err}");
+    let err = c.stats(None).await.unwrap_err().to_string();
+    assert!(err.contains("closed"), "connection was reused: {err}");
+}
+
+#[tokio::test]
+async fn metadump_total_bytes_are_capped() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(&dump_lines(20)).await;
+    })
+    .await;
+    let c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c
+        .dump_keys_with_limit(1_000, 32)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("byte limit"), "{err}");
+}
+
+#[tokio::test]
+async fn uniform_sample_reports_a_byte_capped_scan_as_incomplete() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(&dump_lines(100)).await;
+    })
+    .await;
+    let c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let sample = c
+        .sample_keys_uniform_with_limit(10, 1_000, 128, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(!sample.complete);
+    assert!(sample.entries.len() <= 10);
+    assert!(sample.seen > 0);
+}
+
+#[tokio::test]
+async fn metadata_read_discards_the_value_and_respects_its_budget() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"VALUE k 7 100\r\n").await;
+        let _ = s.write_all(&[b'x'; 100]).await;
+        let _ = s.write_all(b"\r\nEND\r\n").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        c.get_metadata_with_limit(b"k", 1_024).await.unwrap(),
+        Some((7, 100))
+    );
+
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"VALUE k 0 100\r\n").await;
+        let _ = s.write_all(&[b'x'; 100]).await;
+        let _ = s.write_all(b"\r\nEND\r\n").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c
+        .get_metadata_with_limit(b"k", 64)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("exceeds"), "{err}");
+}
+
+#[tokio::test]
+async fn get_total_bytes_are_capped() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"VALUE k 0 20\r\n").await;
+        let _ = s.write_all(&[b'x'; 20]).await;
+        let _ = s.write_all(b"\r\nEND\r\n").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c.get_with_limit(b"k", 16).await.unwrap_err().to_string();
+    assert!(err.contains("exceeds"), "{err}");
+    let err = c.get(b"k").await.unwrap_err().to_string();
+    assert!(err.contains("closed"), "connection was reused: {err}");
+}
+
+#[tokio::test]
+async fn malformed_meta_reply_retires_the_connection() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"WAT\r\n").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c.meta_info(b"k").await.unwrap_err().to_string();
+    assert!(err.contains("malformed"), "{err}");
+    let err = c.meta_info(b"k").await.unwrap_err().to_string();
+    assert!(err.contains("closed"), "connection was reused: {err}");
+}
+
+#[tokio::test]
+async fn partial_value_reply_retires_the_connection() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"VALUE k 0 10\r\nabc").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(c.get(b"k").await.is_err());
+    let err = c.get(b"k").await.unwrap_err().to_string();
+    assert!(err.contains("closed"), "connection was reused: {err}");
+}
+
+#[tokio::test]
+async fn truncated_status_line_is_rejected() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"STORED").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c
+        .store(StoreCmd::Set, b"k", 0, 0, b"v")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("newline"), "{err}");
+}
+
+#[tokio::test]
+async fn mismatched_value_key_is_rejected() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"VALUE other 0 1\r\nx\r\nEND\r\n").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c.get(b"k").await.unwrap_err().to_string();
+    assert!(err.contains("does not match"), "{err}");
+}
+
+#[tokio::test]
+async fn multiple_value_blocks_for_one_get_are_rejected() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s
+            .write_all(b"VALUE k 0 1\r\nx\r\nVALUE k 0 1\r\ny\r\nEND\r\n")
+            .await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c.get(b"k").await.unwrap_err().to_string();
+    assert!(err.contains("multiple VALUE"), "{err}");
+}
+
+#[tokio::test]
+async fn negative_meta_values_are_rejected() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"HD s-1 f-1 t-2 l-1 c-1\r\n").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c.meta_info(b"k").await.unwrap_err().to_string();
+    assert!(err.contains("negative") || err.contains("mg flag"), "{err}");
+}
+
+#[tokio::test]
+async fn write_failure_retires_the_connection() {
+    let addr = fake_server(|s| async move {
+        drop(s);
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    // The peer is gone; a large write must not leave the client reusable.
+    let value = vec![b'x'; 4 * 1024 * 1024];
+    assert!(c.store(StoreCmd::Set, b"k", 0, 0, &value).await.is_err());
+    let err = c.stats(None).await.unwrap_err().to_string();
+    assert!(err.contains("closed"), "connection was reused: {err}");
 }

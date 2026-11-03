@@ -2,10 +2,15 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+pub mod advisor;
+pub mod history;
 pub mod inventory;
 pub mod prometheus;
+pub mod rca;
+pub mod remediation;
+pub mod snapshot;
 
 pub type Stats = BTreeMap<String, String>;
 
@@ -25,7 +30,7 @@ const BUSY_MEMORY_PCT: f64 = 80.0;
 /// Below this many gets the hit ratio says little.
 const MIN_GETS_FOR_RATIO: u64 = 1_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Info,
@@ -48,14 +53,14 @@ fn finding(severity: Severity, code: &'static str, message: String) -> Finding {
     }
 }
 
-fn num(stats: &Stats, key: &str) -> Option<u64> {
+pub(crate) fn num(stats: &Stats, key: &str) -> Option<u64> {
     stats.get(key)?.parse().ok()
 }
 
 /// `get_hits / (get_hits + get_misses)`, or None when absent or there were no gets.
 pub fn hit_ratio(stats: &Stats) -> Option<f64> {
     let hits = num(stats, "get_hits")?;
-    let total = hits + num(stats, "get_misses")?;
+    let total = hits.saturating_add(num(stats, "get_misses")?);
     (total > 0).then(|| hits as f64 / total as f64)
 }
 
@@ -72,7 +77,9 @@ pub fn analyze_node(stats: &Stats, items: &Stats, settings: &Stats) -> Vec<Findi
 }
 
 fn gets(stats: &Stats) -> u64 {
-    num(stats, "get_hits").unwrap_or(0) + num(stats, "get_misses").unwrap_or(0)
+    num(stats, "get_hits")
+        .unwrap_or(0)
+        .saturating_add(num(stats, "get_misses").unwrap_or(0))
 }
 
 fn check_hit_ratio(stats: &Stats, out: &mut Vec<Finding>) {
@@ -174,7 +181,7 @@ fn check_connections(stats: &Stats, settings: &Stats, out: &mut Vec<Finding>) {
 }
 
 /// `stats items` keys look like `items:<slab>:evicted`.
-fn per_slab(items: &Stats, field: &str) -> Vec<(String, u64)> {
+pub(crate) fn per_slab(items: &Stats, field: &str) -> Vec<(String, u64)> {
     items
         .iter()
         .filter_map(|(k, v)| {
@@ -189,7 +196,7 @@ fn per_slab(items: &Stats, field: &str) -> Vec<(String, u64)> {
 
 fn check_eviction_skew(items: &Stats, out: &mut Vec<Finding>) {
     let evicted = per_slab(items, "evicted");
-    let total: u64 = evicted.iter().map(|(_, n)| n).sum();
+    let total: u64 = evicted.iter().fold(0u64, |a, (_, n)| a.saturating_add(*n));
     if total < 100 {
         return;
     }
@@ -510,6 +517,142 @@ mod tests {
             NodeSummary {
                 name: "c",
                 stats: &idle,
+            },
+        ];
+        assert!(compare_nodes(&nodes).is_empty());
+    }
+
+    // ---- edge cases: thresholds, hostile or damaged input -----------------------------------
+
+    fn busy(pct: u64) -> Stats {
+        st(&[
+            ("bytes", &pct.to_string()),
+            ("limit_maxbytes", "100"),
+            ("evictions", "50000"),
+            ("uptime", "1000"),
+        ])
+    }
+
+    #[test]
+    fn busy_evictions_switch_to_critical_at_80_percent_memory() {
+        let none = Stats::new();
+        for (pct, expected) in [
+            (79, Severity::Warning),
+            (80, Severity::Critical),
+            (95, Severity::Critical),
+        ] {
+            let f = analyze_node(&busy(pct), &none, &none);
+            let e = f.iter().find(|f| f.code == "evictions").unwrap();
+            assert_eq!(e.severity, expected, "{pct}%");
+        }
+    }
+
+    #[test]
+    fn evictions_depend_on_uptime_not_just_the_count() {
+        let none = Stats::new();
+        let sev = |ev: &str, up: &str| {
+            let s = st(&[
+                ("bytes", "95"),
+                ("limit_maxbytes", "100"),
+                ("evictions", ev),
+                ("uptime", up),
+            ]);
+            analyze_node(&s, &none, &none)[0].severity
+        };
+        // High uptime, a handful of evictions: noted only.
+        assert_eq!(sev("20", "5000000"), Severity::Info);
+        // Short uptime, heavy evictions: critical.
+        assert_eq!(sev("20000", "60"), Severity::Critical);
+        // Uptime 0 (just started) must not divide by zero.
+        assert_eq!(sev("5", "0"), Severity::Critical);
+    }
+
+    #[test]
+    fn hit_ratio_needs_traffic_to_be_judged() {
+        let none = Stats::new();
+        // Many misses but almost no traffic: only a note.
+        let quiet = st(&[("get_hits", "1"), ("get_misses", "40")]);
+        assert_eq!(
+            codes(&analyze_node(&quiet, &none, &none)),
+            ["hit_ratio_insufficient_data"]
+        );
+        // The same ratio with real traffic is a problem.
+        let loud = st(&[("get_hits", "1000"), ("get_misses", "40000")]);
+        let f = analyze_node(&loud, &none, &none);
+        assert_eq!(
+            (f[0].code, f[0].severity),
+            ("hit_ratio_low", Severity::Critical)
+        );
+        // A freshly restarted node (all counters zero) reports nothing at all.
+        let fresh = st(&[("get_hits", "0"), ("get_misses", "0"), ("evictions", "0")]);
+        assert!(analyze_node(&fresh, &none, &none).is_empty());
+    }
+
+    #[test]
+    fn damaged_or_hostile_numbers_neither_panic_nor_alarm() {
+        let none = Stats::new();
+        for pairs in [
+            // Overflow when summed.
+            vec![
+                ("get_hits", "18446744073709551615"),
+                ("get_misses", "18446744073709551615"),
+            ],
+            // Not numbers, negative, empty, too large for u64.
+            vec![
+                ("get_hits", "abc"),
+                ("get_misses", "-5"),
+                ("evictions", ""),
+                ("bytes", "1e9"),
+            ],
+            vec![
+                ("bytes", "99999999999999999999999"),
+                ("limit_maxbytes", "100"),
+            ],
+            // Zero limit and zero connection limit.
+            vec![
+                ("bytes", "5"),
+                ("limit_maxbytes", "0"),
+                ("curr_connections", "5"),
+            ],
+        ] {
+            let s = st(&pairs);
+            let settings = st(&[("maxconns", "0")]);
+            let _ = analyze_node(&s, &none, &settings);
+        }
+        // Counters from a node that was restarted between two reads (smaller than before) are
+        // just numbers here: nothing is computed from a difference.
+        let items = st(&[
+            ("items:3:evicted", "18446744073709551615"),
+            ("items:4:evicted", "18446744073709551615"),
+        ]);
+        let _ = analyze_node(&Stats::new(), &items, &none);
+    }
+
+    #[test]
+    fn compare_ignores_nodes_with_missing_or_malformed_metrics() {
+        let good = st(&[
+            ("curr_items", "1000"),
+            ("get_hits", "9000"),
+            ("get_misses", "1000"),
+        ]);
+        let none = Stats::new();
+        let junk = st(&[("curr_items", "many"), ("get_hits", "x")]);
+        let nodes = [
+            NodeSummary {
+                name: "a",
+                stats: &good,
+            },
+            NodeSummary {
+                name: "b",
+                stats: &none,
+            },
+            NodeSummary {
+                name: "c",
+                stats: &junk,
+            },
+            NodeSummary {
+                name: "d",
+                stats: &good,
             },
         ];
         assert!(compare_nodes(&nodes).is_empty());
