@@ -1,6 +1,8 @@
 # Tool reference and permissions matrix
 
-Every tool takes the target as `addr` (`host:port`) unless noted. A target must be listed in
+Every tool that contacts a server takes the target as `addr` (`host:port`). Pure-input tools
+(`compare_incident_snapshots`, `analyze_snapshot_history`, `advise_safe_remediation`,
+`analyze_incident_timeline`) take no target. A target must be listed in
 `MEMCACHED_MCP_ALLOWLIST` and must not resolve to a link-local, unspecified or multicast address
 (see [CONFIGURATION.md](CONFIGURATION.md#target-policy)). Keys are validated on every request:
 1-250 bytes, no spaces or control characters.
@@ -12,7 +14,7 @@ process owner holds all of them. A tool needs its permission **and** any server-
 
 | Tool | Permission | Server switch | Changes the server? | Notes |
 | --- | --- | --- | --- | --- |
-| `server_info` | `read` | - | no | `version` plus a `mn` capability probe |
+| `server_info` | `read` | - | no | `version` plus a `mn` capability probe; returns the legacy `version:`/`meta_commands:` text and matching `structuredContent` |
 | `get_stats` | `read` | - | no | optional `group`: only `items`, `slabs`, `sizes`, `settings`, `conns`, `extstore`. Anything else (including `reset`, `detail`, `sizes_enable`) is refused before it is sent |
 | `get_key_metadata` | `read` | - | no | never returns the value. With meta commands it does not touch LRU or fetched state; on older servers (`source: classic`) the value is fetched internally, never returned |
 | `diagnose_node` | `read` | - | no | rules over `stats`, `stats items`, `stats settings` |
@@ -20,6 +22,14 @@ process owner holds all of them. A tool needs its permission **and** any server-
 | `advise_cache_efficiency` | `read` | - | no | read-only efficiency advice from one snapshot with rationale, risk and validation steps; see [DIAGNOSTICS.md](DIAGNOSTICS.md#cache-efficiency-advisor) |
 | `advise_safe_remediation` | `read` | - | no | converts existing findings/reports into human-approved guidance; no commands or changes; see [DIAGNOSTICS.md](DIAGNOSTICS.md#safe-remediation-advisor) |
 | `analyze_snapshot_history` | `read` | - | no | deterministic anomaly detection over user-supplied snapshots; no collection or persistence; see [DIAGNOSTICS.md](DIAGNOSTICS.md#historical-anomaly-detection) |
+| `plan_cache_capacity` | `read` | - | no | capacity/workload facts with optional snapshot deltas; no forecast or time-to-exhaustion |
+| `analyze_slab_fragmentation` | `read` | - | no | slab/chunk efficiency, eviction/OOM, segmented-LRU settings and extstore pressure; no precise allocator claim |
+| `analyze_incident_timeline` | `read` | - | no | chronological intervals from supplied snapshots, reusing diff/history analyzers |
+| `analyze_mcrouter_routing` | `read` | - | no | route-handle inventory, structural risks and optional config comparison; simulation is UNSUPPORTED |
+| `analyze_mcrouter_tko` | `read` | - | no | soft/hard TKO evidence, destination health, failover/queue metrics and missing telemetry |
+| `compare_cache_clusters` | `read` | - | no | compares explicitly supplied Memcached/mcrouter cluster snapshots; no discovery |
+| `advise_cache_migration` | `read` | - | no | structural routing/capacity/version/warmup/rollback advice; no data movement or key simulation |
+| `analyze_memcached_proxy` | `read` | - | no | built-in-proxy stats/settings (1.6.23+); no Lua execution; dynamic behavior UNKNOWN |
 | `capture_node_snapshot` | `read` | - | no | timestamped, bounded snapshot with selected metrics and RCA; no files written |
 | `compare_nodes` | `read` | - | no | 1-256 addresses, read 16 at a time; needs 3 nodes for outlier detection |
 | `mcrouter_get_stats` | `read` | - | no | target must be an mcrouter |
@@ -39,6 +49,49 @@ process owner holds all of them. A tool needs its permission **and** any server-
 
 Write tools are not listed at all unless `MEMCACHED_MCP_ALLOW_WRITE=1`. There is no flush tool.
 Tools that read return an error naming the missing permission, and the denial is audited.
+
+## MCP resources
+
+Resources are bounded, read-only and computed on demand; nothing is scanned in the background.
+URIs are stable and use the `memcache-route://` scheme. A URI longer than 2048 bytes is rejected,
+and no resource text may exceed 64 KiB.
+
+| URI | Permission | Content |
+| --- | --- | --- |
+| `memcache-route://capabilities` | none | Supported, partial and unsupported feature groups and the compatibility summary |
+| `memcache-route://tools` | none | Entry points in the permission-filtered `tools/list` catalogue and safe-use notes |
+| `memcache-route://operator-guide` | none | Read-only usage, evidence, human-approval and secret-handling guidance |
+| `memcache-route://targets` | `read` | Sorted addresses from `MEMCACHED_MCP_ALLOWLIST`, capped at 256 entries; no tokens, key values or credentials |
+
+`memcache-route://targets` is listed for every authorized session but its contents are only
+readable with the `read` permission; a denial is audited as `resources/read`. Unknown
+`memcache-route://` URIs return JSON-RPC `-32002`; other schemes and oversized URIs return
+`-32602`. Resources are documentation and configuration summaries only; they do not call tools or
+servers.
+
+## MCP prompts
+
+Prompts are static, read-only instructions. Retrieving a prompt executes no tool and makes no
+upstream connection. The prompts take no arguments; any argument a client sends is ignored and is
+never interpolated into the prompt text, so untrusted content cannot become an instruction.
+
+| Prompt | Intent |
+| --- | --- |
+| `investigate-memory-pressure` | Evidence-led memory, eviction and slab-capacity investigation |
+| `diagnose-mcrouter-routing` | Route/config/failover investigation without changing the router |
+| `investigate-hit-ratio` | Hit-ratio deterioration across workload, TTL, eviction and routing evidence |
+| `compare-cache-clusters` | Compare explicitly supplied cluster snapshots, including missing coverage |
+| `review-cache-migration` | Migration risk review covering routing, capacity, warmup and rollback |
+| `investigate-failover-tko` | Separate soft TKO, hard TKO and missing telemetry without inventing recovery timing |
+
+## Structured tool output
+
+`server_info` advertises an MCP `outputSchema` (`version` string, `meta_commands` boolean) and
+returns `structuredContent` that matches it. Its existing `content` text
+(`version: ...\nmeta_commands: ...`) is preserved for older clients. Other tools keep their
+existing text/JSON output and do not advertise an output schema, so no unvalidated schema is
+exposed. Structured results that report uncertainty or partial evidence keep those fields; no
+token, key value or internal diagnostic field is added.
 
 `mcrouter_trace_key_route` embeds the key in mcrouter's `__mcrouter__.route(op,key)` expression.
 Keys containing comma, parentheses, backslash, whitespace/control characters are rejected before

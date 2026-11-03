@@ -10,6 +10,27 @@ Branding
   executable, Rust package names, `MEMCACHED_MCP_*` variables, MCP tool names, Helm chart name and
   image repository keep their existing identifiers for compatibility.
 
+Diagnostics
+- Add `plan_cache_capacity`: evidence-limited capacity/workload facts and observed snapshot deltas;
+  no forecast, time-to-exhaustion or RAM-sizing promise.
+- Add `analyze_slab_fragmentation`: slab/chunk efficiency, eviction/OOM, segmented-LRU settings and
+  extstore pressure with explicit uncertainty.
+- Add `analyze_incident_timeline`: chronological incident intervals composed from snapshots,
+  diffs and historical anomaly analysis.
+- Add `analyze_mcrouter_routing`: route-handle inventory, structural risks and proposed-config
+  impact comparison; offline routing simulation is explicitly unsupported.
+- Add `analyze_mcrouter_tko`: soft/hard TKO evidence, destination health, failover/queue counters and
+  missing telemetry.
+- Add `compare_cache_clusters`: read-only comparison of explicitly supplied cluster snapshots.
+- Add `advise_cache_migration`: structural routing/capacity/version/warmup/rollback advice; no data
+  movement or exact key simulation.
+- Add `analyze_memcached_proxy`: read-only built-in-proxy stats adapter (Memcached 1.6.23+); no Lua
+  or configuration execution.
+- Fix `analyze_memcached_proxy`: read fixed `stats proxy`/`stats proxyfuncs` views, honor the
+  `proxy_enabled` value and report disabled, unavailable or unknown evidence explicitly instead of
+  returning empty successful maps.
+- Add the meta `X` stale flag to key metadata and document the feature/version matrix.
+
 Security
 - Session caps are enforced with an atomic reservation: concurrent `initialize` requests can no
   longer all pass the same check. The global and per-user caps are bounded even under a burst.

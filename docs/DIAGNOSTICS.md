@@ -14,6 +14,14 @@ matrix are in [TOOLS.md](TOOLS.md).
 - [Cache efficiency advisor](#cache-efficiency-advisor)
 - [Safe remediation advisor](#safe-remediation-advisor)
 - [Historical anomaly detection](#historical-anomaly-detection)
+- [Capacity planning (`plan_cache_capacity`)](#capacity-planning-plan_cache_capacity)
+- [Slab and storage analysis (`analyze_slab_fragmentation`)](#slab-and-storage-analysis-analyze_slab_fragmentation)
+- [Incident timeline (`analyze_incident_timeline`)](#incident-timeline-analyze_incident_timeline)
+- [mcrouter routing intelligence (`analyze_mcrouter_routing`)](#mcrouter-routing-intelligence-analyze_mcrouter_routing)
+- [mcrouter TKO analysis (`analyze_mcrouter_tko`)](#mcrouter-tko-analysis-analyze_mcrouter_tko)
+- [Multi-cluster comparison (`compare_cache_clusters`)](#multi-cluster-comparison-compare_cache_clusters)
+- [Cache migration advisor (`advise_cache_migration`)](#cache-migration-advisor-advise_cache_migration)
+- [Memcached built-in proxy (`analyze_memcached_proxy`)](#memcached-built-in-proxy-analyze_memcached_proxy)
 
 ## Root-cause analysis (RCA)
 
@@ -834,3 +842,100 @@ Limits:
 - No secrets, keys, values or raw config are read or emitted.
 - Raw pool/destination names are not present in snapshots; topology evidence is aggregate.
 - Prometheus, databases, collectors and external AI services are not required.
+
+## Capacity planning (`plan_cache_capacity`)
+
+Uses one live `stats`/`settings` snapshot and optional incident snapshots. The report returns memory
+utilization/headroom, item and average-item-size facts, hit ratio and gets, eviction rate since
+uptime, connection utilization, and observed first/last snapshot deltas. It explicitly does not
+predict time-to-exhaustion, future traffic, allocator fragmentation or a RAM upgrade outcome.
+`target_hit_ratio` is an optional workload comparison input (0.0–1.0).
+
+Recommendations are read-only and ask for more measurements or review of workload/slab evidence.
+The output is schema-versioned `1.0`, bounded to 256 KiB, with no automatic remediation.
+
+## Slab and storage analysis (`analyze_slab_fragmentation`)
+
+Reads `stats`, `stats items`, `stats slabs` and `stats settings`. Per-class output includes chunk
+size, pages/chunks, used/free chunks, requested bytes, evictions, OOM events, internal chunk waste
+and page utilization. Segmented-LRU settings are reported; per-segment HOT/WARM/COLD/TEMP population
+is not guessed because stable stats do not expose it. Extstore fields are reported when present.
+
+The analyzer distinguishes slab/chunk waste from allocator fragmentation, flags free-capacity versus
+pressure, and never rebalances slabs or changes automove settings.
+
+## Incident timeline (`analyze_incident_timeline`)
+
+Accepts up to 64 snapshots in any order and builds sorted adjacent intervals using the existing
+snapshot diff engine, then includes the historical anomaly analyzer's findings. Each interval reports
+changes, counter resets, topology/RCA deltas, missing evidence and limitations. A single snapshot
+produces no interval rather than an invented event.
+
+## mcrouter routing intelligence (`analyze_mcrouter_routing`)
+
+Inventories known route handles, pools, destinations, maximum depth/fan-out and structural features
+(failover, prefix/operation selectors, shadows, rate limits, migration, warm-up, inline pools, hash
+names, SSL/protocol markers). It flags shadow traffic, synchronous fan-out, migration windows, large
+fan-out and unsupported/custom handles as UNKNOWN. `proposed_config` is treated as untrusted data
+and compared structurally (pools, destinations, handle counts, features).
+
+Offline consistent-hash/routing simulation is **UNSUPPORTED**. The tool never executes a config or
+claims behavioral equivalence; use `mcrouter_trace_key_route` against a live router for actual trace
+validation.
+
+## Memcached built-in proxy (`analyze_memcached_proxy`)
+
+The built-in proxy exists only in proxy-enabled builds starting at Memcached 1.6.23. The adapter reads
+`stats`, `stats settings`, `stats proxy` and `stats proxyfuncs` and reports bounded raw proxy fields
+with explicit version/support status. The two proxy views use fixed internal commands and are not
+reachable through `get_stats`, so clients cannot supply arbitrary statistics subcommands. It never
+compiles or evaluates Lua, never treats proxy configuration as executable code, and reports dynamic
+routing behavior as UNKNOWN. Proxy counter semantics vary by build and route library, so values are
+not converted into causal claims.
+
+`status` is one of:
+
+| Status | Meaning |
+| --- | --- |
+| `observed` | `proxy_enabled=yes` and usable `stats proxy`/`proxyfuncs` fields were read |
+| `disabled` | the server explicitly returned `proxy_enabled=no` |
+| `not_applicable` | version is older than 1.6.23 |
+| `statistics_unavailable` | proxy is enabled but the statistics views failed or returned no fields |
+| `insufficient_evidence` | version is unparseable, or `proxy_enabled` is missing/malformed and no proxy statistics were returned |
+
+The report keeps `enabled` (`true`/`false`/`null`), `detected`, `statistics_available` and a bounded
+`statistics_error`. Command failures are reported as unavailable evidence, never as an empty
+successful map. `settings` contains only proxy-related keys, and `stats`/`functions` are capped at
+128 fields of 256 characters each.
+
+## mcrouter TKO analysis (`analyze_mcrouter_tko`)
+
+Combines the live config and supported mcrouter stats into soft/hard TKO evidence: total/down/suspect
+destinations, `result_*` TKO/connect/timeout counters, cumulative failover/shadow request counters,
+proxy queue depth, config reload failures and config fields such as `failures_until_tko` and probe
+delays when present. Down destinations are hard-TKO evidence; suspect destinations are soft/probe
+evidence. Exact transition times and recovery duration are not available from a snapshot, so they are
+reported as missing evidence rather than inferred.
+
+## Multi-cluster comparison (`compare_cache_clusters`)
+
+Compares two or more explicitly supplied clusters built from captured snapshots. It aggregates
+Memcached capacity/utilization, weighted hit ratio, eviction rate, connection utilization, mcrouter
+destination reachability/coverage, RCA statuses, historical anomaly counts and observed metric
+coverage. The first cluster is the baseline; differences are observations, not causal claims or
+capacity-transfer predictions. No discovery, upstream connection or automatic cluster selection is
+performed.
+
+## Cache migration advisor (`advise_cache_migration`)
+
+Composes structural mcrouter config impact, optional current/target cluster snapshots and optional
+version labels into read-only migration advice. It covers backend/pool membership changes, failover
+changes, capacity/availability differences, version downgrade/proxy-availability risks, cold-cache and
+warm-up implications, rollback considerations and mandatory human approval. Offline key-movement
+simulation is unsupported; live route traces are required before cutover.
+
+## Feature/version matrix
+
+See [COMPATIBILITY.md](../COMPATIBILITY.md#feature-and-version-coverage-matrix) for the maintained
+SUPPORTED / PARTIAL / MISSING / NOT APPLICABLE / NOT VERIFIED matrix and the official source
+revisions used for this audit.

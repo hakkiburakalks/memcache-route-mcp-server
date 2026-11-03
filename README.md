@@ -38,6 +38,14 @@ Status: early alpha (`0.1.0-alpha.9`). See [COMPATIBILITY.md](COMPATIBILITY.md) 
 | `advise_cache_efficiency` | Read-only efficiency advice with evidence, confidence, risks and validation steps |
 | `advise_safe_remediation` | Human-approved remediation guidance from existing findings; no commands or changes |
 | `analyze_snapshot_history` | Deterministic anomaly detection over user-supplied snapshots; no collection |
+| `plan_cache_capacity` | Capacity/workload facts and observed snapshot deltas; no forecast or time-to-exhaustion |
+| `analyze_slab_fragmentation` | Slab/chunk efficiency, eviction/OOM, LRU settings and extstore pressure |
+| `analyze_incident_timeline` | Chronological incident intervals from supplied snapshots |
+| `analyze_mcrouter_routing` | Route-handle inventory, structural risks and config impact; no simulation |
+| `analyze_mcrouter_tko` | Soft/hard TKO evidence, destination health, queue/failover metrics |
+| `compare_cache_clusters` | Compare supplied Memcached/mcrouter cluster snapshots |
+| `advise_cache_migration` | Structural routing/capacity/version/warmup/rollback advice |
+| `analyze_memcached_proxy` | Built-in-proxy stats/settings (1.6.23+); no Lua execution |
 | `capture_node_snapshot` | Timestamped, bounded incident snapshot with selected metrics and RCA; no file writes |
 | `compare_incident_snapshots` | Deterministic diff of two supplied snapshots, including resets and rate suppression rules |
 | `compare_nodes` | Outlier item counts and hit ratios across 3+ nodes |
@@ -183,7 +191,7 @@ helm install mcp deploy/helm/memcached-mcp \
   --set auth.existingSecret=memcached-mcp-auth
 ```
 
-The pod speaks plain HTTP, so expose the Service only through a TLS-terminating ingress and add its public name to `allowedHosts` (the Service's own DNS names, such as `mcp-memcached-mcp.<namespace>.svc`, are accepted automatically so in-cluster clients and Prometheus work). The chart sets startup/readiness/liveness probes, a rolling update with `maxUnavailable: 0`, a 30 s termination grace period, and a PDB when more than one replica is used. To limit who can reach the pod, set `networkPolicy.enabled=true` and list the allowed peers in `networkPolicy.allowFrom`; egress isolation is opt-in through `networkPolicy.egress` because the chart does not know your memcached/mcrouter labels. Session affinity is enabled by default because MCP sessions are per-pod; HPA is off by default because scale-down loses sessions. Production install, upgrade, rollback, token-rotation and incident steps are in [docs/OPERATIONS.md](docs/OPERATIONS.md). An earlier revision of the chart was installed on a local kind cluster to check that the pod starts with the read-only filesystem, that the token file mounts, and that clients using the Service DNS name get through the Host check. The current chart hardening (Secret mode/fsGroup, probes, NetworkPolicy egress, PDB/HPA, digest rendering) has been linted/rendered but not exercised against a live cluster. It has not run on a production cluster. The image is not published, so you have to build and push it yourself.
+The pod speaks plain HTTP, so expose the Service only through a TLS-terminating ingress and add its public name to `allowedHosts` (the Service's own DNS names, such as `mcp-memcached-mcp.<namespace>.svc`, are accepted automatically so in-cluster clients and Prometheus work). The chart sets startup/readiness/liveness probes, a rolling update with `maxUnavailable: 0`, a 30 s termination grace period, and a PDB when more than one replica is used. To limit who can reach the pod, set `networkPolicy.enabled=true` and list the allowed peers in `networkPolicy.allowFrom`; egress isolation is opt-in through `networkPolicy.egress` because the chart does not know your memcached/mcrouter labels. Session affinity is enabled by default because MCP sessions are per-pod; HPA is off by default because scale-down loses sessions. Production install, upgrade, rollback, token-rotation and incident steps are in [docs/OPERATIONS.md](docs/OPERATIONS.md). An earlier revision of the chart was installed on a local kind cluster to check that the pod starts with the read-only filesystem, that the token file mounts, and that clients using the Service DNS name get through the Host check. The current chart was subsequently installed on a local kind v1.37.0 cluster with Secret mode/fsGroup, read-only rootfs, probes, non-root execution and working token authentication; NetworkPolicy/CNI enforcement, PDB/HPA behavior, production ingress and token rotation were not exercised. It has not run on a production cluster. The image is not published, so you have to build and push it yourself.
 
 ## Use with Claude Code
 

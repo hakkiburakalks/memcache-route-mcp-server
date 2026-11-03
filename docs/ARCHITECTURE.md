@@ -14,8 +14,8 @@ Prometheus ──GET /metrics────┘
 | --- | --- | --- |
 | `memcached-protocol` | Encodes commands and parses replies (text protocol, meta commands, `stats`, metadump). Validates everything that is placed on a command line. | none |
 | `memcached-core` | Async `Client` over TCP: timeouts, reply size limits, capability probing, key sampling. A failed read marks the connection unusable. | TCP |
-| `mcrouter` | Parses the running mcrouter config and `stats`, interprets route traces, reasons about failover (with a confidence level), and adds mcrouter RCA, sanitized topology snapshots, and the cluster topology/health model. | none |
-| `diagnostics` | Pure rules over `stats` output: hit ratio, evictions, memory, connections, node comparison, key inventory, Prometheus text, the versioned node RCA layer, bounded incident snapshot/diff, the cache-efficiency advisor, the safe remediation advisor, and historical anomaly detection. | none |
+| `mcrouter` | Parses the running mcrouter config and `stats`, interprets route traces, reasons about failover (with a confidence level), and adds mcrouter RCA, sanitized topology snapshots, cluster topology/health, and structural route-handle/config-impact analysis. | none |
+| `diagnostics` | Pure rules over `stats` output: hit ratio, evictions, memory, connections, node comparison, key inventory, Prometheus text, the versioned node RCA layer, bounded incident snapshot/diff, cache efficiency, safe remediation, historical anomaly detection, capacity planning, slab/chunk analysis and incident timelines. | none |
 | `mcp-server` | The binary. MCP tools (rmcp), HTTP transport (axum), tokens and permissions, audit log, target policy, request limits, `/metrics`. | stdio, HTTP, TCP |
 
 Keeping `memcached-protocol`, `mcrouter` and `diagnostics` free of I/O means every rule and parser
