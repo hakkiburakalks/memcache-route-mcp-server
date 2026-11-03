@@ -1,8 +1,19 @@
 [package]
-name = "diagnostics"
+name = "memcache-route-diagnostics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Pure diagnostic, RCA, capacity, slab, timeline and cluster analysis for Memcached and mcrouter."
+readme = "../../README.md"
+keywords = ["memcached", "diagnostics", "observability", "rca", "cache"]
+categories = ["development-tools", "network-programming"]
+exclude = ["tests/**", "benches/**"]
+
+[lib]
+name = "diagnostics"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,14 +1,25 @@
 [package]
-name = "memcached-core"
+name = "memcache-route-memcached-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Async Memcached client with bounded replies, deadlines and capability probing."
+readme = "../../README.md"
+keywords = ["memcached", "client", "async", "cache", "mcp"]
+categories = ["network-programming", "asynchronous"]
+exclude = ["tests/**", "benches/**"]
+
+[lib]
+name = "memcached_core"
 
 [dependencies]
-memcached-protocol = { path = "../memcached-protocol" }
+memcached-protocol = { package = "memcache-route-memcached-protocol", version = "=0.1.0-alpha.10", path = "../memcached-protocol" }
 thiserror.workspace = true
 serde = { version = "1", features = ["derive"] }
 tokio.workspace = true
 
 [dev-dependencies]
-diagnostics = { path = "../diagnostics" }
+diagnostics = { package = "memcache-route-diagnostics", version = "=0.1.0-alpha.10", path = "../diagnostics" }

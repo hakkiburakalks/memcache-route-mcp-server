@@ -23,7 +23,7 @@ COPY crates ./crates
 # because the target directory is not part of the image layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p mcp-server \
+    cargo build --release --locked -p memcache-route-mcp-server \
     && cp target/release/memcached-mcp /memcached-mcp
 
 FROM scratch

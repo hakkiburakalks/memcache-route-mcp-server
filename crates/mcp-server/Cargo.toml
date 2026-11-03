@@ -1,19 +1,26 @@
 [package]
-name = "mcp-server"
+name = "memcache-route-mcp-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AI-powered diagnostics and troubleshooting for Memcached and mcrouter."
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "MemCacheRoute MCP Server: read-only Memcached and mcrouter diagnostics for MCP clients."
+readme = "../../README.md"
+keywords = ["memcached", "mcrouter", "mcp", "diagnostics", "observability"]
+categories = ["command-line-utilities", "development-tools", "network-programming"]
+exclude = ["tests/**", "benches/**"]
 
 [[bin]]
 name = "memcached-mcp"
 path = "src/main.rs"
 
 [dependencies]
-memcached-core = { path = "../memcached-core" }
-memcached-protocol = { path = "../memcached-protocol" }
-diagnostics = { path = "../diagnostics" }
-mcrouter = { path = "../mcrouter" }
+memcached-core = { package = "memcache-route-memcached-core", version = "=0.1.0-alpha.10", path = "../memcached-core" }
+memcached-protocol = { package = "memcache-route-memcached-protocol", version = "=0.1.0-alpha.10", path = "../memcached-protocol" }
+diagnostics = { package = "memcache-route-diagnostics", version = "=0.1.0-alpha.10", path = "../diagnostics" }
+mcrouter = { package = "memcache-route-mcrouter", version = "=0.1.0-alpha.10", path = "../mcrouter" }
 rmcp = { version = "3.7.0", features = ["server", "transport-io", "macros", "transport-streamable-http-server"] }
 axum = "0.8"
 http-body = "1"

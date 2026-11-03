@@ -217,14 +217,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "diagnostics"
-version = "0.1.0-alpha.9"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -544,17 +536,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
-name = "mcp-server"
-version = "0.1.0-alpha.9"
+name = "memcache-route-diagnostics"
+version = "0.1.0-alpha.10"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "memcache-route-mcp-server"
+version = "0.1.0-alpha.10"
 dependencies = [
  "axum",
- "diagnostics",
  "getrandom",
  "http-body",
  "http-body-util",
- "mcrouter",
- "memcached-core",
- "memcached-protocol",
+ "memcache-route-diagnostics",
+ "memcache-route-mcrouter",
+ "memcache-route-memcached-core",
+ "memcache-route-memcached-protocol",
  "rmcp",
  "schemars",
  "serde",
@@ -564,31 +564,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcrouter"
-version = "0.1.0-alpha.9"
+name = "memcache-route-mcrouter"
+version = "0.1.0-alpha.10"
 dependencies = [
- "diagnostics",
- "memcached-core",
- "memcached-protocol",
+ "memcache-route-diagnostics",
+ "memcache-route-memcached-core",
+ "memcache-route-memcached-protocol",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "memcached-core"
-version = "0.1.0-alpha.9"
+name = "memcache-route-memcached-core"
+version = "0.1.0-alpha.10"
 dependencies = [
- "diagnostics",
- "memcached-protocol",
+ "memcache-route-diagnostics",
+ "memcache-route-memcached-protocol",
  "serde",
  "thiserror",
  "tokio",
 ]
 
 [[package]]
-name = "memcached-protocol"
-version = "0.1.0-alpha.9"
+name = "memcache-route-memcached-protocol"
+version = "0.1.0-alpha.10"
 dependencies = [
  "thiserror",
 ]

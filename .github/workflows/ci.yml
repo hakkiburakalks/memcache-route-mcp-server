@@ -28,7 +28,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      - run: cargo build --release -p mcp-server
+      - run: cargo build --release -p memcache-route-mcp-server
       - run: bash scripts/smoke.sh target/release/memcached-mcp
 
   compat:
@@ -48,18 +48,18 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: cargo test -p memcached-core --test live -- --nocapture
+      - run: cargo test -p memcache-route-memcached-core --test live -- --nocapture
         env:
           MEMCACHED_ADDR: 127.0.0.1:11211
       - name: End-to-end tests of the MCP binary (stdio and HTTP)
-        run: cargo test -p mcp-server --test e2e -- --nocapture
+        run: cargo test -p memcache-route-mcp-server --test e2e -- --nocapture
         env:
           MEMCACHED_ADDR: 127.0.0.1:11211
       - name: Start 4 MB memcached for the eviction test
         run: |
           docker run -d --name small -p 11217:11211 memcached:${{ matrix.version }} -m 4
           sleep 2
-      - run: cargo test -p memcached-core --test eviction -- --nocapture
+      - run: cargo test -p memcache-route-memcached-core --test eviction -- --nocapture
         env:
           MEMCACHED_SMALL_ADDR: 127.0.0.1:11217
 
@@ -75,18 +75,18 @@ jobs:
         run: |
           docker compose -f tests/compat/docker-compose.yml up -d mcrouter mcrouter-failover
           sleep 5
-      - run: cargo test -p mcrouter --test live -- --nocapture
+      - run: cargo test -p memcache-route-mcrouter --test live -- --nocapture
         env:
           MCROUTER_ADDR: 127.0.0.1:11218
       - name: mcrouter tools over MCP, including compare_destinations
-        run: cargo test -p mcp-server --test e2e mcrouter -- --nocapture
+        run: cargo test -p memcache-route-mcp-server --test e2e mcrouter -- --nocapture
         env:
           MCROUTER_ADDR: 127.0.0.1:11218
           MCROUTER_BACKENDS: 127.0.0.1:11219,127.0.0.1:11220,127.0.0.1:11221
       - name: Stop mc-a, then check behaviour with a dead destination
         run: |
           docker compose -f tests/compat/docker-compose.yml stop mc-a
-          cargo test -p mcrouter --test failover -- --nocapture
+          cargo test -p memcache-route-mcrouter --test failover -- --nocapture
         env:
           MCROUTER_PLAIN_ADDR: 127.0.0.1:11218
           MCROUTER_FAILOVER_ADDR: 127.0.0.1:11222

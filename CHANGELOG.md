@@ -2,7 +2,20 @@
 
 All notable changes. The project is pre-1.0 and versions are `0.1.0-alpha.N`.
 
-## 0.1.0-alpha.9 (unreleased)
+## 0.1.0-alpha.10 (unreleased)
+
+Crates.io packaging
+- Rename the application package to `memcache-route-mcp-server`; the installed executable remains
+  `memcached-mcp`.
+- Rename internal crates to project-owned `memcache-route-*` names and publish them in dependency
+  order: protocol, diagnostics, core, mcrouter and application.
+- Preserve Rust import paths with dependency aliases and explicit library names.
+- Add crate descriptions, repository/homepage, Apache-2.0 licensing, README, keywords, categories
+  and package exclusions.
+- No runtime feature or MCP interface changes.
+
+## 0.1.0-alpha.9 (released 2026-11-03)
+
 
 Branding
 - The project is now **MemCacheRoute MCP Server**. README, package descriptions, OCI metadata, Helm

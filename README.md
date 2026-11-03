@@ -15,12 +15,13 @@ prompts. It is **read-only by default**; writes are opt-in, prefix-limited and a
 > This is not an official Memcached, Meta or Anthropic product.
 
 > **Name and compatibility.** The project is **MemCacheRoute MCP Server**. The executable
-> (`memcached-mcp`), Rust package names, environment variables (`MEMCACHED_MCP_*`), MCP tool names,
-> Helm chart name (`memcached-mcp`) and image repository keep their original identifiers so existing
-> scripts and deployments continue to work. The MCP `serverInfo.name` is
+> (`memcached-mcp`), environment variables (`MEMCACHED_MCP_*`), MCP tool names, Helm chart name
+> (`memcached-mcp`) and image repository keep their original identifiers so existing scripts and
+> deployments continue to work. The crates.io package names are project-owned `memcache-route-*`
+> names; the application package is `memcache-route-mcp-server`. The MCP `serverInfo.name` is
 > `memcache-route-mcp-server`; tool names, arguments, schemas and transport behavior are unchanged.
 
-Status: early alpha (`0.1.0-alpha.9`). See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually been tested.
+Status: early alpha (`0.1.0-alpha.10`). See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually been tested.
 
 ## ✨ Features
 
@@ -37,7 +38,7 @@ Status: early alpha (`0.1.0-alpha.9`). See [COMPATIBILITY.md](COMPATIBILITY.md) 
 Build the server and run it over stdio against an allowlisted Memcached node:
 
 ```bash
-cargo build --release --locked -p mcp-server
+cargo build --release --locked -p memcache-route-mcp-server
 MEMCACHED_MCP_ALLOWLIST=127.0.0.1:11211 ./target/release/memcached-mcp
 ```
 
@@ -186,7 +187,16 @@ Destinations without a mapping are reported as `unmapped` rather than guessed.
 Download a binary for Linux, macOS or Windows from the releases page, or build from source:
 
 ```
-cargo build --release -p mcp-server
+cargo build --release -p memcache-route-mcp-server
+```
+
+### From crates.io
+
+The application crate is `memcache-route-mcp-server`; the installed binary remains `memcached-mcp`.
+After the crates.io publication is approved:
+
+```
+cargo install memcache-route-mcp-server --locked
 ```
 
 ## 🐳 Docker
@@ -254,7 +264,7 @@ The dead-destination test needs `mc-a` stopped first (CI does this too):
 
 ```
 docker compose -f tests/compat/docker-compose.yml stop mc-a
-MCROUTER_PLAIN_ADDR=127.0.0.1:11218 MCROUTER_FAILOVER_ADDR=127.0.0.1:11222 cargo test -p mcrouter --test failover
+MCROUTER_PLAIN_ADDR=127.0.0.1:11218 MCROUTER_FAILOVER_ADDR=127.0.0.1:11222 cargo test -p memcache-route-mcrouter --test failover
 ```
 
 Layout: `memcached-protocol` (codec, no I/O), `memcached-core` (client), `diagnostics` and `mcrouter` (pure analysis), `mcp-server` (the binary).
@@ -272,7 +282,7 @@ Layout: `memcached-protocol` (codec, no I/O), `memcached-core` (client), `diagno
 
 ## 📝 Notes
 
-- This is an early alpha (`0.1.0-alpha.9`); diagnostic thresholds are heuristics and have not been tuned on production traffic.
+- This is an early alpha (`0.1.0-alpha.10`); diagnostic thresholds are heuristics and have not been tuned on production traffic.
 - The server never executes remediation, Lua or proxy configuration. Migration and routing advice are evidence-limited and require human approval.
 - Offline routing simulation is unsupported; use live `mcrouter_trace_key_route` and normal change control.
 - See [COMPATIBILITY.md](COMPATIBILITY.md) and [docs/RELEASE-READINESS.md](docs/RELEASE-READINESS.md) for tested scope and remaining release gates.
