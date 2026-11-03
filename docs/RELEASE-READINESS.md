@@ -62,7 +62,7 @@ commands in the docs therefore keep the current URL.
 | `docker compose -f tests/compat/docker-compose.yml config --quiet` | PASS |
 | Markdown links/anchors | PASS — all Markdown links and anchors resolve |
 | Version consistency | PASS — `0.1.0-alpha.9` in workspace, `Cargo.lock`, Chart version/appVersion and changelog |
-| Local history consolidation | PASS — 8 commits ahead, 0 behind; the alpha.9 feature pass is committed locally in five commits |
+| Local history consolidation | PASS — private `main` contains the five planned commits plus one CI correction; no tag |
 | `git diff --check` (worktree and `origin/main..HEAD`) | PASS |
 | Current branding image build/runtime | PASS — `memcached-mcp:0.1.0-alpha.9`, read-only rootfs, healthy `/healthz` |
 | Source/dependency SBOM | PASS — 137 SPDX packages / 139 CycloneDX components |
@@ -403,8 +403,8 @@ and supply-chain changes, so it does **not** cover the current tree or any Git c
   tags.
 - The older `tree-20261103-062017.tgz` / `history-20261103-062017.bundle` pair predates `9b05ad0`
   and is retained only as historical evidence.
-- A fresh tree/history pair must still be created after the five local commits because these backups
-  capture the pre-commit worktree, not the resulting commit IDs.
+- A fresh tree/history pair must still be created after the final commit because this pre-commit
+  backup captures the worktree, not the resulting commit IDs.
 
 ### Consolidation result
 
@@ -416,9 +416,9 @@ Local history consolidation completed on `main`; published history was not rewri
 | `2d78eb1` | MemCacheRoute branding and consolidated documentation | README, changelog, security/contribution docs, `docs/` |
 | `HEAD` | Release hygiene, packaging and verification | Dockerfile, Helm, workflows, scripts, fixtures, ignore rules, cleanup record, `.serena` removal |
 
-- `origin/main` remains `ef65d55`; HEAD is exactly **8 commits ahead and 0 behind**.
-- The tree was clean immediately after consolidation. The later alpha.9 feature pass was committed
-  locally in five commits; it was not pushed or tagged.
+- `origin/main` advanced from `ef65d55` through the private fast-forward pushes described below.
+- The tree was clean immediately after consolidation. The alpha.9 feature pass was committed in
+  five planned commits plus one CI correction and pushed to the private `main` branch; no tag was created.
 - No generated `.pyc`, benchmark output, `.serena` state, SBOM, signing key or temporary evidence is
   present in the commit tree.
 - Tags remain `v0.1.0-alpha.1`–`v0.1.0-alpha.8`; no alpha.9 tag was created.
@@ -473,8 +473,8 @@ ever promoted beyond disposable local tooling, run it with a dedicated non-root 
 
 ### Working-tree audit since `9b05ad0`
 
-- **Five local commits** contain the 16 previously modified tracked files and 8 new analyzer modules.
-  The working tree is clean. No tracked file is deleted
+- **Five planned commits plus one CI correction** contain the 16 previously modified tracked files
+  and 8 new analyzer modules. The working tree is clean. No tracked file is deleted
   by the expanded-alpha pass; the only historical deletions versus `origin/main` are `.serena/`
   agent state. `Cargo.toml` and `Cargo.lock` are unchanged since `9b05ad0`, so no new dependency was
   introduced.
@@ -506,9 +506,9 @@ email, OIDC issuer, subject, filename, path or artifact content is present. The 
 `hashedrekord` entries and the documented public transparency-log deviation remain intact. Policy
 acceptance is still required before publication.
 
-### Executed local commit plan
+### Executed commits and private CI
 
-The five local commits are complete and the worktree is clean:
+The five planned commits plus one CI correction are on private `main`; the worktree is clean:
 
 1. `57a860d` `feat(diagnostics): add expanded analyzers and proxy stats support` — capacity, slab,
    timeline and cluster analyzers, the fixed proxy adapter and client stats views, and regression
@@ -520,11 +520,33 @@ The five local commits are complete and the worktree is clean:
    resources, static prompts, structured output and e2e coverage.
 4. `7133bbc` `docs: update expanded-alpha compatibility and operator guidance` — compatibility,
    tools, diagnostics, architecture, README and changelog.
-5. This release-readiness commit — audit, backups, Rekor confirmation, rename/CI checklist, staging
-   gates and release sequence.
+5. `7d9620e` `docs: finalize alpha.9 release readiness and publication plan` — audit, backups,
+   Rekor confirmation, rename/CI checklist, staging gates and release sequence.
+6. `34beb5c` `fix(diagnostics): satisfy stable clippy some_filter lint` — CI correction using
+   `bool::then_some`; behavior unchanged.
 
 The proxy correction is in commit 1 rather than a standalone commit so that no partial staging of
-the shared diagnostics module or `main.rs`/`e2e.rs` is required. No push, tag or CI run was made.
+the shared diagnostics module or `main.rs`/`e2e.rs` is required.
+
+Private fast-forward pushes:
+
+- `ef65d55..7d9620e` (`main`)
+- `7d9620e..34beb5c` (`main`), correction only
+
+No force push, tag, release, image/Helm publication or repository rename was performed.
+
+CI evidence:
+
+- Run **41586262241** on `7d9620e`
+  <https://github.com/hakkiburakalks/memcached-mcp-server/actions/runs/41586262241>
+  **failed** in `build (ubuntu-latest)` and `build (macos-latest)` at
+  `cargo clippy --all-targets -- -D warnings`: `clippy::some_filter` in
+  `crates/diagnostics/src/snapshot.rs:962`. All other eight jobs passed.
+- Correction `34beb5c` was pushed normally. Run **41587022980**
+  <https://github.com/hakkiburakalks/memcached-mcp-server/actions/runs/41587022980>
+  **passed all 10 jobs**: build (Linux/macOS), mcrouter, Helm, memcached 1.4.39/1.5.22/1.6.45,
+  image build/smoke, audit and licences.
+- This release-readiness evidence update is a final docs-only follow-up and is separately validated.
 
 ### Repository rename checklist
 
@@ -588,9 +610,8 @@ SDK's `Session termination failed: 202` warning; and proxy counter semantics var
 
 ## Remaining release blockers
 
-1. **No CI/release run and no release tag for this tree.** The five alpha.9 commits are local
-   and the worktree is clean; HEAD is eight commits ahead of `origin/main`, local tags end at
-   `v0.1.0-alpha.8`, and no post-commit backup/tag exists yet.
+1. **No release tag or GitHub Release.** Private `main` CI passed at `34beb5c`; local tags
+   still end at `v0.1.0-alpha.8`, and no post-commit tree/history backup exists yet.
 2. **No published image signature or CI provenance.** Local SBOMs, vulnerability/secret scans and a
    local Cosign blob signature exist, but the current local image was built from revision `6441054`,
    not the final tree, and the image is not published or signed by CI.
