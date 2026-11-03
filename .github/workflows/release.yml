@@ -55,13 +55,13 @@ jobs:
           cp "$bin" README.md COMPATIBILITY.md LICENSE "$name/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$name.zip" "$name" > /dev/null
-            echo "ASSET=$name.zip" >> "$GITHUB_ENV"
+            asset="$name.zip"
           else
             tar czf "$name.tar.gz" "$name"
-            echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+            asset="$name.tar.gz"
           fi
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
           # Checksum next to every archive: `sha256sum -c <file>.sha256` verifies it.
-          asset=$(ls "$name".zip "$name".tar.gz 2>/dev/null | head -1)
           if command -v sha256sum >/dev/null; then sha256sum "$asset" > "$asset.sha256"; else shasum -a 256 "$asset" > "$asset.sha256"; fi
           echo "CHECKSUM=$asset.sha256" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
