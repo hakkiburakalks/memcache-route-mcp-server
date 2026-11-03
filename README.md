@@ -1,8 +1,18 @@
-# memcached-mcp
+# MemCacheRoute MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server for Memcached and mcrouter, written in Rust. It gives an AI assistant a safe way to inspect cache servers and diagnose problems. Read-only by default.
+**Understand your cache. Trace your routes. Diagnose with confidence.**
 
-Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually been tested.
+MemCacheRoute MCP Server is an MCP server for Memcached and mcrouter: AI-powered diagnostics and
+troubleshooting for Memcached and mcrouter. It gives an AI assistant a safe way to inspect cache
+servers and diagnose problems. Read-only by default.
+
+> **Name and compatibility.** The project is **MemCacheRoute MCP Server**. The executable
+> (`memcached-mcp`), Rust package names, environment variables (`MEMCACHED_MCP_*`), MCP tool names,
+> Helm chart name (`memcached-mcp`) and image repository keep their original identifiers so existing
+> scripts and deployments continue to work. The MCP `serverInfo.name` is now
+> `memcache-route-mcp-server`; tool names, arguments, schemas and transport behavior are unchanged.
+
+Status: early alpha (`0.1.0-alpha.9`). See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually been tested.
 
 ## Safety model
 
@@ -12,7 +22,8 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 - **Authenticated over HTTP.** The HTTP transport requires a bearer token (see below); stdio relies on whoever can start the process.
 - **Allowlist.** The server only connects to `host:port` pairs listed in `MEMCACHED_MCP_ALLOWLIST` (comma-separated). With an empty list every target is rejected.
 - **Key sampling is opt-in and private by default.** `sample_keys` exists only with `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1` and then returns prefix totals, not key names. Individual key names additionally need `MEMCACHED_MCP_ALLOW_KEY_NAMES=1`. The audit log records that a sample ran, never which keys it saw.
-- **No values.** `get_key_metadata` returns metadata (existence, size, flags and, where supported, TTL and access info), never the value.
+- **No values.** `get_key_metadata` returns metadata (existence, size, flags and, where supported, TTL and access info), never the value. On classic servers the value is read in bounded chunks and discarded, not allocated.
+- **Bounded replies.** Untrusted server replies have byte budgets as well as line limits: `stats` 8 MiB, non-uniform metadump 16 MiB, uniform scan 64 MiB, values 16 MiB. Each command also has a 60-second total deadline, so a slow-dripping server cannot hold a request open forever. An oversized, malformed or timed-out reply is rejected and its connection retired; partial replies are never returned as complete data. A process-wide reservation budget (`MEMCACHED_MCP_MEMORY_BUDGET_MB`, default 96 MiB) is taken before the large reply buffers and maps; it is a reservation limit, not an absolute RSS cap. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#response-size-limits).
 - **Capability probing.** Features are detected by asking the server (`version`, `mn`), not guessed from the version number.
 
 ## Tools
@@ -23,16 +34,29 @@ Status: early. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually be
 | `get_stats` | `stats`, optionally a group (`settings`, `items`, `slabs`, ...) |
 | `get_key_metadata` | Does a key exist; size and flags, plus TTL, last access, fetched-before and CAS on servers with meta commands |
 | `diagnose_node` | Hit ratio, evictions vs memory, connection limits, eviction skew |
+| `diagnose_node_rca` | Versioned, evidence-based root-cause hypotheses for one node, with confidence, alternatives and checks |
+| `advise_cache_efficiency` | Read-only efficiency advice with evidence, confidence, risks and validation steps |
+| `advise_safe_remediation` | Human-approved remediation guidance from existing findings; no commands or changes |
+| `analyze_snapshot_history` | Deterministic anomaly detection over user-supplied snapshots; no collection |
+| `capture_node_snapshot` | Timestamped, bounded incident snapshot with selected metrics and RCA; no file writes |
+| `compare_incident_snapshots` | Deterministic diff of two supplied snapshots, including resets and rate suppression rules |
 | `compare_nodes` | Outlier item counts and hit ratios across 3+ nodes |
 | `mcrouter_get_stats` | mcrouter stats and destination health |
 | `mcrouter_inspect_config` | Running mcrouter config: pools, servers, config problems |
 | `mcrouter_compare_destinations` | Looks at each memcached behind an mcrouter and flags outliers and per-node problems (needs `MEMCACHED_MCP_DEST_MAP`) |
 | `mcrouter_diagnose_failover` | Is there a failover handle, is anything down, and what that means for reads and writes |
+| `mcrouter_diagnose_rca` | Correlates router config/stats with reachable destination stats; reports partial topology coverage and uncertainty |
+| `analyze_cluster_topology` | Explicit-router topology model with pools, destinations, shared/unreachable backends and coverage |
+| `capture_mcrouter_snapshot` | Timestamped snapshot with opaque topology IDs, destination coverage and RCA; no raw config |
 | `mcrouter_trace_key_route` | Which destination a key routes to (asks mcrouter itself); says so when the destination is down |
 | `sample_keys` | What is stored: items, bytes and never-fetched counts per key prefix, from the LRU crawler's metadata dump. Only with `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1` |
 | `set_key`, `delete_key`, `touch_key` | Writes; only with `MEMCACHED_MCP_ALLOW_WRITE=1` |
 
-`sample_keys` puts load on the server (it uses the LRU crawler), reads at most `max_scan` items (10,000 by default, 100,000 at most) and says so when it stopped early. The crawler's order is not random, so a partial scan is biased. Pass `uniform: true` to read the whole dump instead and keep a random sample of `max_scan` items: the totals are then scaled-up estimates for the whole cache (a full crawl, capped at 2 million items or 60 seconds; if the cap is hit the result says it is not random). It needs the crawler to be enabled, which it is on 1.5 and 1.6 but not by default on 1.4 (`-o lru_crawler`).
+`sample_keys` puts load on the server (it uses the LRU crawler), reads at most `max_scan` items (10,000 by default, 100,000 at most) and says so when it stopped early. The crawler's order is not random, so a partial scan is biased. Pass `uniform: true` to read the whole dump instead and keep a random sample of `max_scan` items: the totals are then scaled-up estimates for the whole cache (a full crawl, capped at 2 million items, 64 MiB or 60 seconds; if the cap is hit the result says it is not random). It needs the crawler to be enabled, which it is on 1.5 and 1.6 but not by default on 1.4 (`-o lru_crawler`).
+
+Full schemas, limits and safety properties for the diagnostic tools are in
+[docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md); the permissions matrix and tool contracts are in
+[docs/TOOLS.md](docs/TOOLS.md).
 
 Diagnostic thresholds are heuristics and have not been tuned on production traffic. Looking up a key's metadata still counts in the server's global `get_hits`/`get_misses` totals, though it leaves the item's LRU position and fetched-before state alone.
 
@@ -44,14 +68,14 @@ By default the server speaks MCP over stdio. For shared or remote use, run it as
 MEMCACHED_MCP_HTTP_TOKEN="<at least 24 random characters>" MEMCACHED_MCP_ALLOWLIST=... memcached-mcp --http 127.0.0.1:8080
 ```
 
-The endpoint is `/mcp`. Clients must send `Authorization: Bearer <token>`; requests without it get 401 and are written to the audit log (peer address only, never the token).
+The endpoint is `/mcp`. Clients must send `Authorization: Bearer <token>` (the scheme is case-insensitive); requests without it get 401 and are written to the audit log (peer address only, never the token).
 
 - The token is mandatory; the server refuses to start without one of at least 24 characters.
 - There is no TLS. Binding to anything other than loopback is refused unless `MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1`, because the token would cross the network in clear text. Put a TLS-terminating proxy in front and bind to loopback.
 - `Host` headers are checked against loopback names on every route (including `/metrics`) to block DNS rebinding. Behind a proxy, list the public hostnames in `MEMCACHED_MCP_HTTP_ALLOWED_HOSTS` (comma-separated).
 - At most 256 sessions can be open at once (`MEMCACHED_MCP_HTTP_MAX_SESSIONS` changes it); further `initialize` requests get `503` with `Retry-After`. Idle sessions are dropped after 5 minutes, so the slots free up on their own.
-- Each user (token) may have 16 requests in flight at once (`MEMCACHED_MCP_HTTP_MAX_CONCURRENT` changes it); more get `429` with `Retry-After`. Every tool call opens its own connection to memcached, so this bounds what one token can do to a server. Open sessions are also capped per user (32, `MEMCACHED_MCP_HTTP_MAX_SESSIONS_PER_USER`), so one token cannot use up the global cap.
-- Failed logins are written to the audit log, at most 20 lines per second; the rest are summarised in one line, so a flood of bad tokens cannot fill the disk.
+- Each user (token) may have 16 requests in flight at once (`MEMCACHED_MCP_HTTP_MAX_CONCURRENT` changes it); more get `429` with `Retry-After`. This covers tool POSTs and `/metrics` scrapes; a long-lived `GET /mcp` event stream is bounded by the session cap instead. Every tool call opens its own connection to memcached, so this bounds what one token can do to a server. Open sessions are also capped per user (32, `MEMCACHED_MCP_HTTP_MAX_SESSIONS_PER_USER`), so one token cannot use up the global cap. A process-wide `MEMCACHED_MCP_MAX_UPSTREAM_CONNECTIONS` budget (default 64) bounds all tool connections and fails closed when exhausted. A separate process-wide reservation budget, `MEMCACHED_MCP_MEMORY_BUDGET_MB` (default 96), is taken before large reply buffers, STAT maps, metadump scans and the cached `/metrics` body; it fails closed and is a reservation limit, not an absolute process memory cap.
+- Failed logins are written to the audit log, at most 20 lines per second; the rest are summarised in one line, so a flood of bad tokens cannot fill the disk. All audit output has a 100-line/second process-wide backstop, fields are clipped, and multi-address allowlist denials are aggregated into one line.
 - A single shared token means one identity with full access. For per-user access see below.
 
 ### Per-user tokens and permissions
@@ -79,7 +103,7 @@ It prints the token once (give it to Alice) and the entry to add to the file:
 | `write` | `set_key`, `delete_key`, `touch_key` |
 | `metrics` | `/metrics` |
 
-A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is re-read every 5 seconds while the server runs, so adding, changing or removing a user (revocation) takes effect without a restart, including for open sessions on their next request. An empty `users` list on reload revokes everyone (at startup it is still an error). If an edit does not parse, the server logs it to the audit log and keeps the previous users. Tokens are 256 random bits, so a fast hash is enough.
+A permission never widens the server-wide switches: writes still need `MEMCACHED_MCP_ALLOW_WRITE=1` (and the prefix limit), sampling still needs `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`. The audit log records the user name on every entry, including denials. The file is re-read every 5 seconds while the server runs, so adding, changing or removing a user (revocation) takes effect without a restart, including for open sessions on their next request. Removing a user or rotating their token also closes that user's open sessions; an empty `users` list on reload revokes everyone (at startup it is still an error). If an edit does not parse, the server logs it to the audit log and keeps the previous users. Tokens are 256 random bits, so a fast hash is enough.
 
 ### Prometheus metrics
 
@@ -96,7 +120,9 @@ scrape_configs:
     static_configs: [{ targets: ["127.0.0.1:8080"] }]
 ```
 
-`/metrics` uses the same bearer token and is absent unless targets are configured. It exports raw counters and gauges (`memcached_get_hits_total`, `memcached_evictions_total`, `memcached_used_bytes`, ...) labelled by `instance`, plus `memcached_up` (0 when a target is unreachable). Ratios and rates are left to PromQL, e.g. `rate(memcached_get_hits_total[5m]) / (rate(memcached_get_hits_total[5m]) + rate(memcached_get_misses_total[5m]))`. Scrapes are not written to the audit log. mcrouter instances can be added with `MEMCACHED_MCP_MCROUTER_METRICS_TARGETS` (also allowlisted); they export `mcrouter_up`, destination counts (`mcrouter_destinations`, `_up`, `_down`, `_suspect`), client connections, routed get/set/delete counts, queue depth and memory. mcrouter's `stats` has no per-destination detail, so with `MEMCACHED_MCP_DEST_MAP` set the server reads each mcrouter's pools and probes every mapped, allowlisted destination itself, exporting `mcrouter_destination_up{instance,destination}`. That is reachability from the MCP server's network position, not mcrouter's own view, and unmapped destinations are left out. It costs one connection per destination per scrape. The output passes `promtool check metrics`.
+`/metrics` uses the same bearer token and is absent unless targets are configured. It exports raw counters and gauges (`memcached_get_hits_total`, `memcached_evictions_total`, `memcached_used_bytes`, ...) labelled by `instance`, plus `memcached_up` (0 when a target is unreachable). Ratios and rates are left to PromQL, e.g. `rate(memcached_get_hits_total[5m]) / (rate(memcached_get_hits_total[5m]) + rate(memcached_get_misses_total[5m]))`. Scrapes are not written to the audit log. mcrouter instances can be added with `MEMCACHED_MCP_MCROUTER_METRICS_TARGETS` (also allowlisted); they export `mcrouter_up`, destination counts (`mcrouter_destinations`, `_up`, `_down`, `_suspect`), client connections, routed get/set/delete counts, queue depth and memory. mcrouter's `stats` has no per-destination detail, so with `MEMCACHED_MCP_DEST_MAP` set the server reads each mcrouter's pools and probes every mapped, allowlisted destination itself, exporting `mcrouter_destination_up{instance,destination}`. That is reachability from the MCP server's network position, not mcrouter's own view, and unmapped destinations are left out. It costs one connection per destination per scrape.
+
+Scrapes are protected against stampedes and slow upstreams: a process-wide request cap (default 4, `429` above), bounded fan-out (16), an 8 s overall deadline (`503` above), a 5 s successful-body cache with singleflight, a 64 KiB stats / 256 KiB mcrouter-config per-target budget. Concurrent callers share one refresh; a failed refresh never serves an expired body. A target that cannot be read is `memcached_up 0`/`mcrouter_up 0`, never healthy. `memcached_mcp_metrics_cache_age_seconds` and `last_refresh_timestamp_seconds` expose freshness; see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#metrics-resource-and-freshness-semantics) for tuning. The output is expected to pass `promtool check metrics`; this is not run in CI.
 
 ## mcrouter destinations
 
@@ -137,26 +163,32 @@ docker run -d -p 127.0.0.1:8080:8080 \
   -e MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT=1 memcached-mcp --http 0.0.0.0:8080
 ```
 
-Both modes were tried against a memcached on the same Docker network. The image is built in CI but not published anywhere, and it has not been run on a Kubernetes cluster (see the Helm chart below).
+Both modes were tried against a memcached on the same Docker network. The image is built in CI but
+not published anywhere. The builder is pinned by version and digest. The alpha.9 image was rebuilt
+locally and scanned with Syft/Trivy (0 vulnerabilities, 0 secrets); a Cosign blob signature was
+verified (transparency-logged, not an image signature), but there is no CI-backed image
+signature/provenance or published image yet. See
+[docs/CONTAINER-SECURITY.md](docs/CONTAINER-SECURITY.md).
 
 ## Kubernetes (Helm)
 
-A chart is in `deploy/helm/memcached-mcp`. It runs the HTTP transport as a non-root, read-only-filesystem pod and refuses to render without an allowlist and an existing Secret holding the credentials:
+A chart is in `deploy/helm/memcached-mcp`. It runs the HTTP transport as a non-root, read-only-filesystem pod, refuses to render without an allowlist and an existing Secret holding the credentials, and validates critical values with `values.schema.json`:
 
 ```
 kubectl create secret generic memcached-mcp-auth --from-file=tokens.json
 helm install mcp deploy/helm/memcached-mcp \
-  --set image.repository=registry.example.com/memcached-mcp --set image.tag=0.1.0-alpha.8 \
+  --set image.repository=registry.example.com/memcached-mcp \
+  --set image.digest=sha256:<64-hex> \
   --set 'allowlist={memcached-0.memcached:11211}' \
   --set auth.existingSecret=memcached-mcp-auth
 ```
 
-The pod speaks plain HTTP, so expose the Service only through a TLS-terminating ingress and add its public name to `allowedHosts` (the Service's own DNS names, such as `mcp-memcached-mcp.<namespace>.svc`, are accepted automatically so in-cluster clients and Prometheus work). To limit who can reach the pod, set `networkPolicy.enabled=true` and list the allowed peers in `networkPolicy.allowFrom` (this only has an effect on a CNI that enforces NetworkPolicy). The chart lints and renders in CI, and was installed on a local kind cluster to check that the pod starts with the read-only filesystem, that the token file mounts, and that clients using the Service DNS name get through the Host check. It has not run on a production cluster. The image is not published, so you have to build and push it yourself.
+The pod speaks plain HTTP, so expose the Service only through a TLS-terminating ingress and add its public name to `allowedHosts` (the Service's own DNS names, such as `mcp-memcached-mcp.<namespace>.svc`, are accepted automatically so in-cluster clients and Prometheus work). The chart sets startup/readiness/liveness probes, a rolling update with `maxUnavailable: 0`, a 30 s termination grace period, and a PDB when more than one replica is used. To limit who can reach the pod, set `networkPolicy.enabled=true` and list the allowed peers in `networkPolicy.allowFrom`; egress isolation is opt-in through `networkPolicy.egress` because the chart does not know your memcached/mcrouter labels. Session affinity is enabled by default because MCP sessions are per-pod; HPA is off by default because scale-down loses sessions. Production install, upgrade, rollback, token-rotation and incident steps are in [docs/OPERATIONS.md](docs/OPERATIONS.md). An earlier revision of the chart was installed on a local kind cluster to check that the pod starts with the read-only filesystem, that the token file mounts, and that clients using the Service DNS name get through the Host check. The current chart hardening (Secret mode/fsGroup, probes, NetworkPolicy egress, PDB/HPA, digest rendering) has been linted/rendered but not exercised against a live cluster. It has not run on a production cluster. The image is not published, so you have to build and push it yourself.
 
 ## Use with Claude Code
 
 ```
-claude mcp add memcached -e MEMCACHED_MCP_ALLOWLIST=127.0.0.1:11211 -- /path/to/memcached-mcp
+claude mcp add memcache-route -e MEMCACHED_MCP_ALLOWLIST=127.0.0.1:11211 -- /path/to/memcached-mcp
 ```
 
 ## Develop

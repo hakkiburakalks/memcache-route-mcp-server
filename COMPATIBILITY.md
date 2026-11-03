@@ -1,6 +1,9 @@
 # Compatibility
 
-"Verified" means the `live` integration test passes in CI against that server image. Everything else is a target, not a guarantee.
+"Verified" means the `live` integration test has passed against that server image, in CI or in the
+isolated compatibility matrix described in [docs/RELEASE-READINESS.md](docs/RELEASE-READINESS.md).
+CI pins the patch versions below and the mcrouter image digest. Everything else is a target, not a
+guarantee.
 
 | Server | Status | Notes |
 | --- | --- | --- |
@@ -11,7 +14,7 @@
 | mcrouter | Verified (34.0.0) | Config, stats, route tracing and failover behaviour via the memcached protocol (see below) |
 | AWS ElastiCache | Not tested | |
 | Docker | Image builds in CI; stdio and HTTP modes run against a memcached on the same Docker network (by hand) | |
-| Kubernetes | Not tested | |
+| Kubernetes | Manual kind smoke test | The chart is linted/rendered in CI and was installed on a local kind cluster; it has not run on a production cluster or in CI |
 
 Key metadata (TTL, last access, fetched-before, CAS) comes from `mg` on servers where the `mn` probe succeeds (1.6.x here); older servers report only flags and size.
 
@@ -23,9 +26,9 @@ Capabilities are probed at runtime (`version`, `mn`), not inferred from the vers
 
 | Platform | Status |
 | --- | --- |
-| Linux | CI build and test; release binaries (x86_64, aarch64, musl) are built but have not been run |
-| macOS | CI build and test; release binaries (Apple Silicon, Intel) are built but have not been run |
-| Windows | Developed and tested locally; release binary is built in CI and was smoke-tested once by hand (alpha.1). The test suite does not run on Windows in CI |
+| Linux | CI build and test; release binaries (x86_64, aarch64, musl) are built and smoke-tested by the release workflow, but have not been run against a live server on those platforms |
+| macOS | CI build and test; release binaries (Apple Silicon, Intel) are built and smoke-tested by the release workflow, but have not been run against a live server on those platforms |
+| Windows | Developed and tested locally; the release binary is built and smoke-tested by the release workflow. The test suite does not run on Windows in CI |
 
 ## mcrouter behaviour observed with a dead destination (34.0.0)
 
@@ -37,4 +40,4 @@ Automated in CI: protocol codec and the diagnostic rules (unit tests); the clien
 
 Also automated: the mcrouter tools over MCP against a healthy three-node topology, including `mcrouter_compare_destinations` with a full mapping, a missing mapping, and a mapping outside the allowlist.
 
-Not covered by an automated end-to-end test: `mcrouter_compare_destinations` and the other mcrouter tools while a destination is down (the analysis itself is tested), and concurrent or long-running HTTP sessions. The Linux and macOS release binaries have never been executed.
+Not covered by an automated end-to-end test: `mcrouter_compare_destinations` and the other mcrouter tools while a destination is down (the analysis itself is tested), and long-running HTTP sessions. Concurrent HTTP session-cap behavior is covered by the security regression tests. The release binaries are smoke-tested by the release workflow; they are not exercised against a live server on Linux or macOS.
