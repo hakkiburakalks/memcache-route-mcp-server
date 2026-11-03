@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-03
 
-**Status:** **NO-GO for release**. Local and private-CI build, test, live protocol, failover,
+**Status:** **NO-GO for release**. Local and CI build, test, live protocol, failover,
 branding image runtime and supply-chain verification evidence is present, and the GitHub prerelease
 `v0.1.0-alpha.9` is published; published image/chart provenance, staging and production gates are
 not.
@@ -63,7 +63,7 @@ The internal compatibility identifiers listed above are unchanged.
 | `docker compose -f tests/compat/docker-compose.yml config --quiet` | PASS |
 | Markdown links/anchors | PASS — all Markdown links and anchors resolve |
 | Version consistency | PASS — `0.1.0-alpha.9` in workspace, `Cargo.lock`, Chart version/appVersion and changelog |
-| Local history consolidation | PASS — private `main` contains the five planned commits plus one CI correction; no tag |
+| Local history consolidation | PASS — `main` contains the five planned commits plus one CI correction; no tag |
 | `git diff --check` (worktree and `origin/main..HEAD`) | PASS |
 | Current branding image build/runtime | PASS — `memcached-mcp:0.1.0-alpha.9`, read-only rootfs, healthy `/healthz` |
 | Source/dependency SBOM | PASS — 137 SPDX packages / 139 CycloneDX components |
@@ -417,9 +417,9 @@ Local history consolidation completed on `main`; published history was not rewri
 | `2d78eb1` | MemCacheRoute branding and consolidated documentation | README, changelog, security/contribution docs, `docs/` |
 | `HEAD` | Release hygiene, packaging and verification | Dockerfile, Helm, workflows, scripts, fixtures, ignore rules, cleanup record, `.serena` removal |
 
-- `origin/main` advanced from `ef65d55` through the private fast-forward pushes described below.
+- `origin/main` advanced from `ef65d55` through the fast-forward pushes described below.
 - The tree was clean immediately after consolidation. The alpha.9 feature pass was committed in
-  five planned commits plus one CI correction and pushed to the private `main` branch;
+  five planned commits plus one CI correction and pushed to the `main` branch;
   `v0.1.0-alpha.9` is tagged and published with a GitHub prerelease.
 - No generated `.pyc`, benchmark output, `.serena` state, SBOM, signing key or temporary evidence is
   present in the commit tree.
@@ -509,9 +509,9 @@ email, OIDC issuer, subject, filename, path or artifact content is present. The 
 `hashedrekord` entries and the documented public transparency-log deviation remain intact. Policy
 acceptance is still required before publication.
 
-### Executed commits and private CI
+### Executed commits and CI
 
-The five planned commits plus one CI correction are on private `main`; the worktree is clean:
+The five planned commits plus one CI correction are on `main`; the worktree is clean:
 
 1. `57a860d` `feat(diagnostics): add expanded analyzers and proxy stats support` — capacity, slab,
    timeline and cluster analyzers, the fixed proxy adapter and client stats views, and regression
@@ -531,7 +531,7 @@ The five planned commits plus one CI correction are on private `main`; the workt
 The proxy correction is in commit 1 rather than a standalone commit so that no partial staging of
 the shared diagnostics module or `main.rs`/`e2e.rs` is required.
 
-Private fast-forward pushes:
+Fast-forward pushes:
 
 - `ef65d55..7d9620e` (`main`)
 - `7d9620e..34beb5c` (`main`), correction only
@@ -562,7 +562,7 @@ CI evidence:
 
 Completed on 2026-11-03:
 
-- GitHub repository is now **`hakkiburakalks/memcache-route-mcp-server`**, private, default branch
+- GitHub repository is now **`hakkiburakalks/memcache-route-mcp-server`**, default branch
   `main`; the old slug redirects.
 - Local `origin` was updated to
   `https://github.com/hakkiburakalks/memcache-route-mcp-server.git`. SSH is not configured locally
@@ -606,7 +606,7 @@ SDK's `Session termination failed: 202` warning; and proxy counter semantics var
 
 ### Remaining release sequence after approval
 
-1. Already complete: repository rename, private CI, tag `v0.1.0-alpha.9` on `d586988`, and the GitHub
+1. Already complete: repository rename, CI, tag `v0.1.0-alpha.9` on `d586988`, and the GitHub
    prerelease with five-platform archives and checksums.
 2. Create a fresh post-commit tree archive and history bundle if a post-release backup is required.
 3. Accept or reject the Rekor deviation, then rebuild from tag `d586988` and publish/sign the image,
