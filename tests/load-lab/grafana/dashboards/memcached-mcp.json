@@ -1,0 +1,102 @@
+{
+  "uid": "memcached-mcp",
+  "title": "MemCacheRoute / Memcached + mcrouter metrics",
+  "tags": ["memcached", "mcrouter"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(memcached_up, instance)",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Nodes up",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(memcached_up{instance=~\"$instance\"})", "refId": "A" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Nodes down",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
+      "targets": [{ "expr": "count(memcached_up{instance=~\"$instance\"} == 0) or vector(0)", "refId": "A" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Hit ratio (5m)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [{
+        "expr": "rate(memcached_get_hits_total{instance=~\"$instance\"}[5m]) / (rate(memcached_get_hits_total{instance=~\"$instance\"}[5m]) + rate(memcached_get_misses_total{instance=~\"$instance\"}[5m]))",
+        "legendFormat": "{{instance}}", "refId": "A"
+      }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Evictions per second",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [{ "expr": "rate(memcached_evictions_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Memory used / limit",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [{ "expr": "memcached_used_bytes{instance=~\"$instance\"} / memcached_limit_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Items",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "memcached_current_items{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Commands per second (get / set)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(memcached_commands_get_total{instance=~\"$instance\"}[5m]))", "legendFormat": "get", "refId": "A" },
+        { "expr": "sum(rate(memcached_commands_set_total{instance=~\"$instance\"}[5m]))", "legendFormat": "set", "refId": "B" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Connections",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "memcached_current_connections{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "mcrouter destinations (up / down / suspect)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "mcrouter_destinations_up", "legendFormat": "up {{instance}}", "refId": "A" },
+        { "expr": "mcrouter_destinations_down", "legendFormat": "down {{instance}}", "refId": "B" },
+        { "expr": "mcrouter_destinations_suspect", "legendFormat": "suspect {{instance}}", "refId": "C" }
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Destination reachable from the MCP server",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "targets": [{ "expr": "mcrouter_destination_up", "legendFormat": "{{destination}}", "refId": "A" }]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# Scrapes the MCP server's /metrics (which in turn scrapes memcached and mcrouter).
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: memcached-mcp
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials: lab-token-lab-token-lab-token-0123456789   # LAB_TOKEN default; lab only
+    static_configs:
+      - targets: ["mcp:8080"]

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "MemCacheRoute MCP Server Helm values",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["image", "allowlist", "auth"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^(|sha256:[a-f0-9]{64})$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": { "type": "array" },
+    "allowlist": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "auth": {
+      "type": "object",
+      "required": ["existingSecret", "mode"],
+      "properties": {
+        "existingSecret": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["token", "file"] },
+        "tokenKey": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$" },
+        "fileKey": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$" },
+        "secretDefaultMode": { "type": "integer", "minimum": 0, "maximum": 511 }
+      }
+    },
+    "allowedHosts": { "type": "array", "items": { "type": "string" } },
+    "clusterDomain": { "type": "string", "minLength": 1 },
+    "replicaCount": { "type": "integer", "minimum": 0 },
+    "revisionHistoryLimit": { "type": "integer", "minimum": 0 },
+    "progressDeadlineSeconds": { "type": "integer", "minimum": 1 },
+    "minReadySeconds": { "type": "integer", "minimum": 0 },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 10 },
+    "memoryBudgetMb": { "type": "integer", "minimum": 1, "maximum": 4096 },
+    "upstreamMaxConnections": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "maxConcurrent": { "type": "integer", "minimum": 1 },
+        "fanout": { "type": "integer", "minimum": 1 },
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "cacheMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "scaleDownStabilizationSeconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "properties": {
+        "startup": { "$ref": "#/definitions/probe" },
+        "readiness": { "$ref": "#/definitions/probe" },
+        "liveness": { "$ref": "#/definitions/probe" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "sessionAffinity": { "enum": ["", "None", "ClientIP"] },
+        "sessionAffinityConfig": { "type": "object" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "allowFrom": { "type": "array" },
+        "egress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "rules": { "type": "array" }
+          }
+        },
+        "dns": {
+          "type": "object",
+          "properties": {
+            "namespace": { "type": "string", "minLength": 1 },
+            "podSelector": { "type": "object" }
+          }
+        }
+      }
+    },
+    "resources": { "type": "object" }
+  },
+  "definitions": {
+    "probe": {
+      "type": "object",
+      "properties": {
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

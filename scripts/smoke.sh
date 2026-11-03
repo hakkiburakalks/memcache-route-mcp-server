@@ -11,7 +11,7 @@ out=$( { printf '%s\n' \
   printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
   sleep 1; } | MEMCACHED_MCP_ALLOWLIST=127.0.0.1:11211 "$bin" )
 
-echo "$out" | grep -q '"name":"memcached-mcp"' || { echo "no server info in: $out"; exit 1; }
+echo "$out" | grep -q '"name":"memcache-route-mcp-server"' || { echo "no server info in: $out"; exit 1; }
 echo "$out" | grep -q '"name":"server_info"' || { echo "no tools listed in: $out"; exit 1; }
 if echo "$out" | grep -q '"name":"set_key"'; then echo "write tools must be hidden by default"; exit 1; fi
 

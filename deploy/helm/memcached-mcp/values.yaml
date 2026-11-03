@@ -1,9 +1,15 @@
-# The image is not published anywhere yet: build it from the Dockerfile and push it to your own
-# registry, then set repository and tag.
+# The probes use /healthz, which exists from alpha.9 (and from builds after alpha.8): use an
+# image that has it. The image is not published anywhere yet: build it from the Dockerfile and
+# push it to your own registry, then set repository and tag.
 image:
   repository: memcached-mcp
   tag: ""            # defaults to the chart's appVersion
+  # Optional immutable digest, e.g. sha256:... . Production should set this (or use a registry
+  # that enforces immutable tags); the rendered reference is repository:tag@digest.
+  digest: ""
   pullPolicy: IfNotPresent
+
+imagePullSecrets: []
 
 # host:port pairs the server may connect to. Required: with none, every target is rejected.
 # e.g. ["memcached-0.memcached:11211", "mcrouter:5000"]
@@ -17,6 +23,9 @@ auth:
   mode: file
   tokenKey: token
   fileKey: tokens.json
+  # Secret files are mounted 0440 (group-readable by the pod's fsGroup 65532); only the selected
+  # key is projected and the volume is read-only.
+  secretDefaultMode: 0440
 
 # Extra Host header names accepted besides loopback and the Service's own DNS names
 # (<name>, <name>.<namespace>, <name>.<namespace>.svc, <name>.<namespace>.svc.<clusterDomain>).
@@ -28,6 +37,19 @@ clusterDomain: cluster.local
 metrics:
   memcachedTargets: []
   mcrouterTargets: []
+  # Process-wide /metrics protection; see docs/CONFIGURATION.md.
+  maxConcurrent: 4
+  fanout: 16
+  timeoutMs: 8000
+  cacheMs: 5000
+
+# Process-wide cap for MCP tool/upstream connections. /metrics has its own bounded fan-out.
+upstreamMaxConnections: 64
+
+# Process-wide reservation budget (MiB) for untrusted reply buffers, STAT maps, metadump scans
+# and the cached /metrics body. This is not a process RSS limit: JSON/HTTP copies and allocator
+# overhead are outside it. The 256Mi container limit below is not proven by this value.
+memoryBudgetMb: 96
 
 # Write tools. Off by default; prefixes limits which keys may be written.
 write:
@@ -41,23 +63,93 @@ keySampling:
 # mcrouter destination names -> reachable addresses, as "name=addr" entries.
 destMap: []
 
+# Sessions, rate limits and the token file are per pod. With more than one replica, keep a
+# client on one pod (sessionAffinity) or it will be asked to re-initialise when it lands on
+# another pod. Limits then apply per replica, not across them.
+replicaCount: 1
+
+# Rollout/availability controls. maxUnavailable: 0 + maxSurge: 1 replaces one pod at a time.
+revisionHistoryLimit: 3
+progressDeadlineSeconds: 600
+minReadySeconds: 0
+terminationGracePeriodSeconds: 30
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# Rendered only with more than one replica (or autoscaling enabled). HPA scale-down ignores a
+# PDB; in-memory MCP sessions are still lost when a pod goes away.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# HPA is off by default. It is unsafe for long-lived MCP sessions without working session
+# affinity and client retry/re-initialise behavior; scale-down terminates sessions. Per-pod
+# limits multiply with the replica count. Requires metrics-server. The CPU target is a percentage
+# of resources.requests.cpu (50m by default), which is small and can make CPU scaling noisy;
+# tune the request and target together before enabling.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  scaleDownStabilizationSeconds: 300
+
+probes:
+  startup:
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 30
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
 service:
   type: ClusterIP
   port: 8080
+  # MCP sessions live in one pod's memory. Keep clients on the pod that created their session;
+  # behind an ingress/LB, a 7th OSI-layer cookie or equivalent sticky routing is also needed.
+  sessionAffinity: ClientIP   # "" or None to disable
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
 
-# Modest defaults: the server is a thin proxy, but each tool call buffers up to 16 MiB of value.
+# Modest defaults: the server is a thin proxy, but each tool call buffers up to 16 MiB of value
+# and a 256-node compare at high concurrency used ~136 MiB in the lab. The limit leaves headroom.
 resources:
   requests:
     cpu: 50m
     memory: 32Mi
   limits:
-    memory: 128Mi
+    memory: 256Mi
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# Optional spread rules, e.g. across nodes:
+# [{maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway,
+#   labelSelector: {matchLabels: {app.kubernetes.io/name: memcached-mcp}}}]
+topologySpreadConstraints: []
 
 # Restrict who can reach the pod (needs a CNI that enforces NetworkPolicy). Each entry is a
 # NetworkPolicy peer, e.g. [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}].
+# Egress isolation is opt-in because the chart does not know your memcached/mcrouter labels.
+# When enabled, DNS is allowed to dns.namespace/dns.podSelector and `rules` must be non-empty;
+# specify destination peers and ports (for example TCP 11211 and 5000) explicitly.
 networkPolicy:
   enabled: false
   allowFrom: []
+  egress:
+    enabled: false
+    rules: []
+  dns:
+    namespace: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns

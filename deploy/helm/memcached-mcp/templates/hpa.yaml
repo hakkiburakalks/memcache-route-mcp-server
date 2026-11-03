@@ -1,0 +1,27 @@
+{{- if .Values.autoscaling.enabled }}
+{{- if lt (int .Values.autoscaling.minReplicas) 2 }}{{ fail "autoscaling.minReplicas must be >= 2: MCP sessions are per pod and a single replica cannot drain safely" }}{{ end }}
+{{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) }}{{ fail "autoscaling.maxReplicas must be >= autoscaling.minReplicas" }}{{ end }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "memcached-mcp.fullname" . }}
+  labels:
+    {{- include "memcached-mcp.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "memcached-mcp.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.scaleDownStabilizationSeconds }}
+{{- end }}

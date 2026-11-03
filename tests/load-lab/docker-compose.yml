@@ -1,0 +1,86 @@
+# Local test laboratory: 3 memcached nodes with different memory limits, mcrouter in front of
+# them, the MCP server (built from this repository) and a load generator.
+#
+#   docker compose up -d --build            # lab without load
+#   docker compose --profile observability up -d   # adds Prometheus (and Grafana)
+#   ./run-load.sh read-heavy                # see README.md
+#
+# Memory limits (MB) are configurable: MC1_MB=64 MC2_MB=128 MC3_MB=256 docker compose up -d
+# Everything runs on the private network "lab"; only the MCP port is published, on loopback.
+name: memcached-mcp-lab
+
+x-memcached: &memcached
+  image: memcached:1.6
+  networks: [lab]
+  restart: "no"
+
+services:
+  mc1:
+    <<: *memcached
+    command: ["-m", "${MC1_MB:-64}", "-o", "lru_crawler"]
+  mc2:
+    <<: *memcached
+    command: ["-m", "${MC2_MB:-128}", "-o", "lru_crawler"]
+  mc3:
+    <<: *memcached
+    command: ["-m", "${MC3_MB:-256}", "-o", "lru_crawler"]
+
+  mcrouter:
+    image: mcrouter/mcrouter
+    command: ["mcrouter", "--config-file=/etc/mcrouter.json", "-p", "5000"]
+    volumes: ["./mcrouter.json:/etc/mcrouter.json:ro"]
+    networks: [lab]
+    depends_on: [mc1, mc2, mc3]
+
+  mcp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: memcached-mcp:lab
+    command: ["--http", "0.0.0.0:8080"]
+    environment:
+      MEMCACHED_MCP_HTTP_TOKEN: "${LAB_TOKEN:-lab-token-lab-token-lab-token-0123456789}"
+      MEMCACHED_MCP_HTTP_ALLOW_PLAINTEXT: "1"
+      MEMCACHED_MCP_HTTP_ALLOWED_HOSTS: "mcp,mcp:8080"
+      MEMCACHED_MCP_ALLOWLIST: "mc1:11211,mc2:11211,mc3:11211,mcrouter:5000"
+      MEMCACHED_MCP_METRICS_TARGETS: "mc1:11211,mc2:11211,mc3:11211"
+      MEMCACHED_MCP_MCROUTER_METRICS_TARGETS: "mcrouter:5000"
+      MEMCACHED_MCP_DEST_MAP: "mc1:11211=mc1:11211,mc2:11211=mc2:11211,mc3:11211=mc3:11211"
+      MEMCACHED_MCP_ALLOW_KEY_SAMPLING: "1"
+    ports: ["127.0.0.1:${MCP_PORT:-18080}:8080"]
+    networks: [lab]
+    depends_on: [mc1, mc2, mc3, mcrouter]
+
+  # Started on demand by run-load.sh (profile "load"): `docker compose run --rm loadgen ...`.
+  loadgen:
+    image: python:3.12-slim
+    profiles: ["load"]
+    working_dir: /lab
+    volumes: ["./:/lab:ro"]
+    entrypoint: ["python", "/lab/loadgen.py"]
+    networks: [lab]
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    volumes: ["./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["127.0.0.1:19090:9090"]
+    networks: [lab]
+    depends_on: [mcp]
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - "./grafana/provisioning:/etc/grafana/provisioning:ro"
+      - "./grafana/dashboards:/var/lib/grafana/dashboards:ro"
+    ports: ["127.0.0.1:13000:3000"]
+    networks: [lab]
+    depends_on: [prometheus]
+
+networks:
+  lab:
+    name: memcached-mcp-lab

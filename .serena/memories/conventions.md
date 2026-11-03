@@ -1,4 +1,0 @@
-- Doc comments `//!`/`///` terse; explain constraints (e.g. key <=250 bytes), not the obvious.
-- Codec functions return `Result<_, ProtocolError>`; server-reported errors map to `ProtocolError::Server`.
-- Unit tests inline in `#[cfg(test)] mod tests`; use golden byte fixtures for wire formats.
-- Workspace-inherited `version`/`edition`/`license` in each crate manifest.

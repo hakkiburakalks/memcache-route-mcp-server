@@ -1,0 +1,31 @@
+memcached-mcp is installed.
+
+  MCP endpoint: http://{{ include "memcached-mcp.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.service.port }}/mcp
+  Health check: http://{{ include "memcached-mcp.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.service.port }}/healthz
+
+{{- if not .Values.networkPolicy.enabled }}
+WARNING: NetworkPolicy is disabled. Enable networkPolicy.enabled with explicit ingress peers in
+clusters that enforce NetworkPolicy; the Service itself is only the first isolation layer.
+{{- else if not .Values.networkPolicy.egress.enabled }}
+WARNING: NetworkPolicy ingress is enabled but egress is not isolated. Add
+networkPolicy.egress.rules for the memcached/mcrouter destinations if your CNI supports it.
+{{- end }}
+
+{{- if eq .Values.auth.mode "token" }}
+WARNING: auth.mode=token uses one shared token from an environment variable. Prefer auth.mode=file
+with per-user hashed tokens; rotating the Secret requires a pod restart in token mode.
+{{- else }}
+The token file is re-read every 5 seconds. Update the Secret to rotate or revoke users; give
+kubelet time to propagate the projected file.
+{{- end }}
+
+{{- if gt (int .Values.replicaCount) 1 }}
+With {{ .Values.replicaCount }} replicas, MCP sessions remain in one pod. Keep Service
+sessionAffinity (ClientIP) and make the ingress/load balancer sticky as well; otherwise clients
+will be asked to re-initialise when routed to another pod.
+{{- end }}
+
+{{- if .Values.autoscaling.enabled }}
+WARNING: autoscaling is enabled. HPA scale-down terminates pods and loses their in-memory MCP
+sessions; verify client retry/re-initialise behavior before using it in production.
+{{- end }}

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: memcached-mcp
-description: MCP server for inspecting and diagnosing Memcached and mcrouter (Streamable HTTP).
+description: MemCacheRoute MCP Server - AI-powered diagnostics and troubleshooting for Memcached and mcrouter (Streamable HTTP).
 type: application
-version: 0.1.0
-appVersion: "0.1.0-alpha.8"
+version: 0.1.0-alpha.9
+appVersion: "0.1.0-alpha.9"

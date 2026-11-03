@@ -1,0 +1,6 @@
+{
+  "pools": {
+    "main": { "servers": ["mc1:11211", "mc2:11211", "mc3:11211"] }
+  },
+  "route": "PoolRoute|main"
+}

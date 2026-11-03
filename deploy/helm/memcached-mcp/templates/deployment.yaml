@@ -1,6 +1,9 @@
 {{- if not .Values.allowlist }}{{ fail "allowlist must list at least one host:port" }}{{ end }}
 {{- if not .Values.auth.existingSecret }}{{ fail "auth.existingSecret is required: the server will not start without credentials" }}{{ end }}
 {{- if not (has .Values.auth.mode (list "token" "file")) }}{{ fail "auth.mode must be token or file" }}{{ end }}
+{{- with .Values.image.digest }}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" .) }}{{ fail "image.digest must be sha256:<64 lowercase hex characters>" }}{{ end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,26 +11,40 @@ metadata:
   labels:
     {{- include "memcached-mcp.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
+  minReadySeconds: {{ .Values.minReadySeconds }}
+  strategy:
+    {{- toYaml .Values.strategy | nindent 4 }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "memcached-mcp.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "memcached-mcp.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: memcached-mcp
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ include "memcached-mcp.image" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["--http", "0.0.0.0:8080"]
           ports:
@@ -55,6 +72,18 @@ spec:
             {{- $own := list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.%s" $svc $ns .Values.clusterDomain) }}
             - name: MEMCACHED_MCP_HTTP_ALLOWED_HOSTS
               value: {{ join "," (concat $own .Values.allowedHosts) | quote }}
+            - name: MEMCACHED_MCP_MAX_UPSTREAM_CONNECTIONS
+              value: {{ .Values.upstreamMaxConnections | quote }}
+            - name: MEMCACHED_MCP_MEMORY_BUDGET_MB
+              value: {{ .Values.memoryBudgetMb | quote }}
+            - name: MEMCACHED_MCP_METRICS_MAX_CONCURRENT
+              value: {{ .Values.metrics.maxConcurrent | quote }}
+            - name: MEMCACHED_MCP_METRICS_FANOUT
+              value: {{ .Values.metrics.fanout | quote }}
+            - name: MEMCACHED_MCP_METRICS_TIMEOUT_MS
+              value: {{ .Values.metrics.timeoutMs | quote }}
+            - name: MEMCACHED_MCP_METRICS_CACHE_MS
+              value: {{ .Values.metrics.cacheMs | quote }}
             {{- with .Values.metrics.memcachedTargets }}
             - name: MEMCACHED_MCP_METRICS_TARGETS
               value: {{ join "," . | quote }}
@@ -83,12 +112,23 @@ spec:
               value: "1"
             {{- end }}
             {{- end }}
-          # A plain HTTP probe would get 401, so check that the port accepts connections.
+          # /healthz needs no token and no Host header (kubelet probes use the pod IP). It reports
+          # that the process is serving, not that upstream Memcached targets are reachable.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
           readinessProbe:
-            tcpSocket: { port: http }
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           livenessProbe:
-            tcpSocket: { port: http }
-            initialDelaySeconds: 5
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -109,6 +149,8 @@ spec:
         - name: auth
           secret:
             secretName: {{ .Values.auth.existingSecret }}
+            defaultMode: {{ .Values.auth.secretDefaultMode }}
+            optional: false
             items:
               - key: {{ .Values.auth.fileKey }}
                 path: {{ .Values.auth.fileKey }}
@@ -123,5 +165,9 @@ spec:
       {{- end }}
       {{- with .Values.affinity }}
       affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}

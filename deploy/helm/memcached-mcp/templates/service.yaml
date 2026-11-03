@@ -6,6 +6,15 @@ metadata:
     {{- include "memcached-mcp.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
+  {{- with .Values.service.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  {{- if eq .Values.service.sessionAffinity "ClientIP" }}
+  {{- with .Values.service.sessionAffinityConfig }}
+  sessionAffinityConfig:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
   ports:
     - name: http
       port: {{ .Values.service.port }}

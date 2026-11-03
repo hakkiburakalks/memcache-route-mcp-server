@@ -1,0 +1,13 @@
+{{- if and .Values.podDisruptionBudget.enabled (or (gt (int .Values.replicaCount) 1) .Values.autoscaling.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "memcached-mcp.fullname" . }}
+  labels:
+    {{- include "memcached-mcp.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "memcached-mcp.selectorLabels" . | nindent 6 }}
+{{- end }}

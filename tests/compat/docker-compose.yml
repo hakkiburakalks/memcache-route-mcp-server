@@ -1,39 +1,40 @@
 # One container per memcached version; host ports 11214 / 11215 / 11216.
 services:
   mc14:
-    image: memcached:1.4
+    image: memcached:1.4.39
     ports: ["11214:11211"]
   mc15:
-    image: memcached:1.5
+    image: memcached:1.5.22
     ports: ["11215:11211"]
   mc16:
-    image: memcached:1.6
+    image: memcached:1.6.45
     ports: ["11216:11211"]
   # 4 MB limit so the eviction test can fill it quickly.
   mc-small:
-    image: memcached:1.6
+    image: memcached:1.6.45
     command: ["-m", "4"]
     ports: ["11217:11211"]
   # mcrouter in front of three memcached nodes; host port 11218.
+  # Digest-pinned: the Docker Hub repository publishes only `latest` (a 2017 image).
   # Backends are also published on the host (11219-11221) so tests can reach them directly.
   mc-a:
-    image: memcached:1.6
+    image: memcached:1.6.45
     ports: ["11219:11211"]
   mc-b:
-    image: memcached:1.6
+    image: memcached:1.6.45
     ports: ["11220:11211"]
   mc-c:
-    image: memcached:1.6
+    image: memcached:1.6.45
     ports: ["11221:11211"]
   mcrouter:
-    image: mcrouter/mcrouter
+    image: mcrouter/mcrouter@sha256:1fc13cbc9ea649e20bfd67cd1dcb817d1b7b1114becde71182ff661e7f374353
     command: ["mcrouter", "--config-file=/etc/mcrouter.json", "-p", "5000"]
     volumes: ["./mcrouter.json:/etc/mcrouter.json:ro"]
     ports: ["11218:5000"]
     depends_on: [mc-a, mc-b, mc-c]
   # mcrouter with a FailoverRoute (primary mc-a, backup mc-b); host port 11222.
   mcrouter-failover:
-    image: mcrouter/mcrouter
+    image: mcrouter/mcrouter@sha256:1fc13cbc9ea649e20bfd67cd1dcb817d1b7b1114becde71182ff661e7f374353
     command: ["mcrouter", "--config-file=/etc/mcrouter.json", "-p", "5000"]
     volumes: ["./mcrouter-failover.json:/etc/mcrouter.json:ro"]
     ports: ["11222:5000"]

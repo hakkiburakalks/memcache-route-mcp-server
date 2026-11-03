@@ -1,9 +1,11 @@
 # Release readiness
 
-**Date:** 2026-11-03  
+**Date:** 2026-11-03
+
 **Status:** **NO-GO for release**. Local build, test, live protocol, failover, branding image
 runtime and supply-chain verification evidence is present; CI/tag, published image provenance,
-Helm runtime and release-publication gates are not.  
+Helm runtime and release-publication gates are not.
+
 **Production readiness:** **NOT VERIFIED**.
 
 This is the consolidated record of the final QA, P1 live-integration, stabilization and
@@ -60,7 +62,8 @@ commands in the docs therefore keep the current URL.
 | `docker compose -f tests/compat/docker-compose.yml config --quiet` | PASS |
 | Markdown links/anchors | PASS — all 56 links resolve |
 | Version consistency | PASS — `0.1.0-alpha.9` in workspace, `Cargo.lock`, Chart version/appVersion and changelog |
-| `git diff --check` | PASS |
+| Local history consolidation | PASS — 3 commits ahead, 0 behind, clean working tree |
+| `git diff --check` (worktree and `origin/main..HEAD`) | PASS |
 | Current branding image build/runtime | PASS — `memcached-mcp:0.1.0-alpha.9`, read-only rootfs, healthy `/healthz` |
 | Source/dependency SBOM | PASS — 137 SPDX packages / 139 CycloneDX components |
 | Image SBOM | PASS — scratch image (1 filesystem package; dependencies covered by source SBOM) |
@@ -281,48 +284,35 @@ and supply-chain changes, so it does **not** cover the current tree or any Git c
 Together, the tree archive and Git bundle cover all current release files and all local-only
 commits/tags. The previous backup alone is insufficient.
 
-### Published and local history
+### Consolidation result
 
-- Published base (`origin/main`): `ef65d55`.
-- Current HEAD: `6441054`; **7 local-only commits**, 0 behind.
-- Local commits: `ea950e8`, `bbd0c52`, `79ee6be`, `5f91add`, `0e9d50f`, `7c7b2a1`, `6441054`.
-- Generated artifacts exist only in local-only commits:
-  - `0e9d50f` — `tests/load-lab/__pycache__/bench_mcp.cpython-313.pyc`
-  - `7c7b2a1` — `tests/load-lab/results/bench-local.log`
-  - `6441054` — `bench-local.json` and a later `bench-local.log`
-- `.serena/` is already in published history; it contains agent notes, not secrets. Rewriting
-  published history for it is not justified.
-- No history rewrite, rebase, reset, squash, amend, staging or commit was performed.
+Local history consolidation completed on `main`; published history was not rewritten.
 
-### Exact non-destructive consolidation plan (approval required)
+| Commit | Subject | Scope |
+|---|---|---|
+| `0f9ffbf` | Harden runtime security, reliability and diagnostics | Rust crates, Cargo metadata/lock, tests |
+| `2d78eb1` | MemCacheRoute branding and consolidated documentation | README, changelog, security/contribution docs, `docs/` |
+| `HEAD` | Release hygiene, packaging and verification | Dockerfile, Helm, workflows, scripts, fixtures, ignore rules, cleanup record, `.serena` removal |
 
-**Plan A — recommended for a clean first public push.** It preserves the working tree and published
-history; only the seven unpublished commits are re-shaped.
+- `origin/main` remains `ef65d55`; HEAD is exactly **3 commits ahead and 0 behind**.
+- Working tree is clean; no staging/commit/push/tag beyond the approved three local commits.
+- No generated `.pyc`, benchmark output, `.serena` state, SBOM, signing key or temporary evidence is
+  present in the commit tree.
+- Tags remain `v0.1.0-alpha.1`–`v0.1.0-alpha.8`; no alpha.9 tag was created.
 
-1. Freeze and re-verify the tree archive and Git bundle above; record current `HEAD` and
-   `origin/main`.
-2. Repoint only the unpublished branch: `git reset --mixed origin/main`. The working tree is not
-   modified; the index is repopulated from the final release tree.
-3. Create logical commits (messages are suggestions):
-   - `Harden client, diagnostics, deployment and release tooling`: `crates/`, `tests/`, `Cargo.toml`,
-     `Cargo.lock`, `deploy/`, `scripts/`, `Dockerfile`, `.dockerignore`, `.github/`.
-   - `MemCacheRoute branding and documentation consolidation`: `README.md`, `CHANGELOG.md`,
-     `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `COMPATIBILITY.md`, `docs/`,
-     `REPOSITORY-CLEANUP-REPORT.md`.
-   - `Release hygiene`: `.gitignore`, `.gitattributes`, removal of `.serena/`, Python cache and
-     generated benchmark output.
-4. Confirm `git status --short` is clean, generated artifacts are absent, and
-   `git diff --stat origin/main..HEAD` contains only intended files.
-5. Run the full gates, then a normal `git push origin main` (no force needed; the new commits descend
-   from `origin/main`). Tag only after approval.
+### Tree comparison and recovery
 
-Rollback: clone the verified bundle into a fresh directory or use the live `git reflog` to return to
-`6441054`; no hard reset is required. Risk: local commit hashes change, tags and published history do
-not; the tree archive preserves all file content.
-
-**Plan B — no rewrite.** Keep the seven commits and add one cleanup commit for the final tree. This is
-simpler and non-destructive, but the Python cache/benchmark artifacts remain in the public history
-once pushed (they are absent from the release tree). Use only if clean history is not required.
+- Pre-consolidation tree archive: 91 files, 126 entries, SHA-256
+  `8D045B81229BA6012A7CE7F86612B038822CEADB51656A097364EB45BC4427F1`.
+- Final tree: 91 files. All source and test files are byte-identical to the archive. The only
+  differences are the final whitespace/metadata updates in `LICENSE`,
+  `REPOSITORY-CLEANUP-REPORT.md` and `docs/RELEASE-READINESS.md`; no source, test, fixture, Helm or
+  workflow file differs or is missing.
+- Full pre-consolidation history: `history-final-20261103-062507.bundle`, SHA-256
+  `DF4C78CD4D44C2CFDB75F7B16699FC70D57AF1FD3FED918CF84674D46F295082`; `git bundle verify`
+  reports a complete history containing `6441054`, `origin/main` (`ef65d55`) and all tags.
+- Recovery path: clone the verified bundle into a fresh directory or use the live `git reflog` to
+  return to the pre-consolidation state. No hard reset or destructive recovery is required.
 
 The actual GitHub repository rename to `memcache-route-mcp-server` and all URL/source-label updates
 remain blocked until the remote rename is approved.
