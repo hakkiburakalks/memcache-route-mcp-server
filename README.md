@@ -156,7 +156,7 @@ A permission never widens the server-wide switches: writes still need `MEMCACHED
 In HTTP mode the server can also expose memcached counters at `/metrics`, so Prometheus keeps the history and you get trends and alerting without this project storing anything:
 
 ```
-MEMCACHED_MCP_METRICS_TARGETS="10.0.1.5:11211,10.0.1.6:11211"   # each must also be in MEMCACHED_MCP_ALLOWLIST
+MEMCACHED_MCP_METRICS_TARGETS="192.0.2.5:11211,192.0.2.6:11211"   # each must also be in MEMCACHED_MCP_ALLOWLIST
 ```
 
 ```yaml
@@ -175,8 +175,8 @@ Scrapes are protected against stampedes and slow upstreams: a process-wide reque
 mcrouter names its destinations as it sees them (often container or service names such as `mc-a:11211`), which this server may not be able to resolve. To inspect the memcached nodes behind an mcrouter, map those names to reachable addresses, and allowlist the addresses too:
 
 ```
-MEMCACHED_MCP_DEST_MAP="mc-a:11211=10.0.1.5:11211,mc-b:11211=10.0.1.6:11211"
-MEMCACHED_MCP_ALLOWLIST="10.0.0.9:5000,10.0.1.5:11211,10.0.1.6:11211"
+MEMCACHED_MCP_DEST_MAP="mc-a:11211=192.0.2.5:11211,mc-b:11211=192.0.2.6:11211"
+MEMCACHED_MCP_ALLOWLIST="192.0.2.9:5000,192.0.2.5:11211,192.0.2.6:11211"
 ```
 
 Destinations without a mapping are reported as `unmapped` rather than guessed.
