@@ -959,8 +959,8 @@ pub fn compare_snapshots(
         }
     }
 
-    if let Some(rate) = Some(())
-        .filter(|_| rate_interval_valid && !uptime_reset)
+    if let Some(rate) = (rate_interval_valid && !uptime_reset)
+        .then_some(())
         .and_then(|_| {
             let b = metric_u64(&before.metrics.counters, "evictions")?;
             let a = metric_u64(&after.metrics.counters, "evictions")?;
