@@ -2,9 +2,10 @@
 
 **Date:** 2026-11-03
 
-**Status:** **NO-GO for release**. Local build, test, live protocol, failover, branding image
-runtime and supply-chain verification evidence is present; CI/tag, published image provenance,
-Helm runtime and release-publication gates are not.
+**Status:** **NO-GO for release**. Local and private-CI build, test, live protocol, failover,
+branding image runtime and supply-chain verification evidence is present, and the GitHub prerelease
+`v0.1.0-alpha.9` is published; published image/chart provenance, staging and production gates are
+not.
 
 **Production readiness:** **NOT VERIFIED**.
 
@@ -418,10 +419,12 @@ Local history consolidation completed on `main`; published history was not rewri
 
 - `origin/main` advanced from `ef65d55` through the private fast-forward pushes described below.
 - The tree was clean immediately after consolidation. The alpha.9 feature pass was committed in
-  five planned commits plus one CI correction and pushed to the private `main` branch; no tag was created.
+  five planned commits plus one CI correction and pushed to the private `main` branch;
+  `v0.1.0-alpha.9` is tagged and published with a GitHub prerelease.
 - No generated `.pyc`, benchmark output, `.serena` state, SBOM, signing key or temporary evidence is
   present in the commit tree.
-- Tags remain `v0.1.0-alpha.1`–`v0.1.0-alpha.8`; no alpha.9 tag was created.
+- Tags include `v0.1.0-alpha.1`–`v0.1.0-alpha.9`; the alpha.9 tag has a published GitHub
+  prerelease.
 
 ### Tree comparison and recovery
 
@@ -486,7 +489,7 @@ ever promoted beyond disposable local tooling, run it with a dedicated non-root 
   `.claude-flow/`, `.claude/` and `.swarm/`.
 - Current tree: **40 Rust source/test files** (32 tracked + 8 new) and **16 Markdown documents**.
 - Version is consistently `0.1.0-alpha.9` in workspace/crates, `Cargo.lock`, chart version/appVersion,
-  changelog and README. The newest tag remains `v0.1.0-alpha.8`; no alpha.9 tag exists.
+  changelog and README. The newest tag is `v0.1.0-alpha.9`, which has a published GitHub prerelease.
 - The compatibility matrix was reviewed: the proxy row is now `SUPPORTED (live)`; no `FAIL` status
   remains. Partial/unsupported entries (extstore, exact routing simulation, dynamic proxy/Lua
   behavior and non-live production coverage) still match their evidence and are not claimed complete.
@@ -583,8 +586,9 @@ Completed on 2026-11-03:
 - Release workflow prerequisites already present: `v*` tag, `v$chartAppVersion` equality,
   `contents: write`, `id-token: write` and `attestations: write`. It builds archives and provenance
   but does **not** publish or sign a container image, SBOM, Helm chart or registry artifact.
-- The current local image was built from revision `6441054`, not the final `9b05ad0` tree; rebuild
-  from the release tag after commit and attach keyless CI provenance/signature.
+- The current local image was built from the final alpha.9 tag commit `d586988` and smoke-tested
+  (read-only rootfs, UID/GID 65532, `/healthz` 200, MCP initialize 200); it is still unpublished and
+  unsigned. Publish it from the tag with keyless CI provenance/signature when approved.
 - No registry credentials or signing identity are configured. Publication requires an approved
   registry, keyless CI identity (or managed key), image signing, SBOM attachment and scan evidence.
 
@@ -600,29 +604,25 @@ claim; no Lua execution or dynamic proxy-route analysis; no automatic remediatio
 protocol; no production-traffic evidence for the analyzers; one independent MCP client matrix; the
 SDK's `Session termination failed: 202` warning; and proxy counter semantics varying by build.
 
-### Exact release sequence after approval
+### Remaining release sequence after approval
 
-1. Approve the tag, release and image-publication plan; the rename and private CI are complete.
-2. Create a fresh post-commit tree archive and history bundle.
-3. Tag and push:
-   ```sh
-   git tag -a v0.1.0-alpha.9 -m "MemCacheRoute MCP Server 0.1.0-alpha.9"
-   git push origin main
-   git push origin v0.1.0-alpha.9
-   ```
-4. Let CI/release build archives and provenance; verify the tag matches chart `appVersion`.
-5. Accept or reject the Rekor deviation, then publish/sign the image, SBOM, scans and Helm artifact
-   under the approved registry/CI identity.
-6. Deploy to the isolated staging cluster, run the staging gates above, and record the result.
-7. Only then approve production readiness; production currently remains **NOT VERIFIED**.
+1. Already complete: repository rename, private CI, tag `v0.1.0-alpha.9` on `d586988`, and the GitHub
+   prerelease with five-platform archives and checksums.
+2. Create a fresh post-commit tree archive and history bundle if a post-release backup is required.
+3. Accept or reject the Rekor deviation, then rebuild from tag `d586988` and publish/sign the image,
+   SBOM, scans and Helm artifact under the approved registry/CI identity.
+4. Deploy to the isolated staging cluster, run the staging gates above, and record the result.
+5. Only then approve production readiness; production currently remains **NOT VERIFIED**.
 
 ## Remaining release blockers
 
-1. **No release tag or GitHub Release.** Private `main` CI passed at `34beb5c`; local tags
-   still end at `v0.1.0-alpha.8`, and no post-commit tree/history backup exists yet.
-2. **No published image signature or CI provenance.** Local SBOMs, vulnerability/secret scans and a
-   local Cosign blob signature exist, but the current local image was built from revision `6441054`,
-   not the final tree, and the image is not published or signed by CI.
+1. **crates.io publication is deferred.** `v0.1.0-alpha.9` is tagged and published with
+   five-platform prerelease archives, but the `0.1.0-alpha.10` crates.io packaging pass was reverted
+   in `0c23265` and nothing was published to crates.io. The preparation remains available in history
+   if publication is revisited. No post-commit tree/history backup exists yet.
+2. **No published image signature or CI provenance.** The final-tag local image
+   (`memcached-mcp:0.1.0-alpha.9`, revision `d586988`) was built and smoke-tested, but no image is
+   published or signed by CI. Local SBOMs, scans and a Cosign blob signature cover earlier evidence.
 3. **Helm runtime is only locally smoke-tested.** The chart installed and ran on
    kind v1.37.0 with Secret projection, fsGroup, non-root/read-only security and working auth.
    Production ingress, NetworkPolicy CNI enforcement, PDB/HPA behavior, rollout/rollback and token

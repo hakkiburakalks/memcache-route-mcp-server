@@ -2,7 +2,7 @@
 
 All notable changes. The project is pre-1.0 and versions are `0.1.0-alpha.N`.
 
-## 0.1.0-alpha.9 (unreleased)
+## 0.1.0-alpha.9 (released 2026-11-03)
 
 Branding
 - The project is now **MemCacheRoute MCP Server**. README, package descriptions, OCI metadata, Helm
