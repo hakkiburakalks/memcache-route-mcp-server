@@ -9,7 +9,7 @@ binary: terminate it at a proxy, ingress or service mesh.
 Download the archive for your platform from the GitHub release, or build:
 
 ```
-cargo build --release --locked -p memcache-route-mcp-server      # target/release/memcached-mcp
+cargo build --release --locked -p mcp-server      # target/release/memcached-mcp
 ```
 
 stdio, for a local assistant:

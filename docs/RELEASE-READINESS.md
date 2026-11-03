@@ -2,68 +2,15 @@
 
 **Date:** 2026-11-03
 
-**Status:** **NO-GO for release**. Local and private-CI build/test/live evidence is present and
-the GitHub prerelease exists; published image provenance, crates.io publication, staging and
-production gates are not complete.
+**Status:** **NO-GO for release**. Local build, test, live protocol, failover, branding image
+runtime and supply-chain verification evidence is present; CI/tag, published image provenance,
+Helm runtime and release-publication gates are not.
 
 **Production readiness:** **NOT VERIFIED**.
 
 This is the consolidated record of the final QA, P1 live-integration, stabilization and
 work-package reports. The project is safe for local and controlled staging validation; it is not
 claimed to be production-ready.
-
-## Crates.io publication (0.1.0-alpha.10)
-
-The application package is **`memcache-route-mcp-server`**; the installed executable remains
-**`memcached-mcp`**. This is a packaging-only successor to the GitHub `v0.1.0-alpha.9` release; no
-GitHub tag or release is modified by this work.
-
-Registry audit (2026-11-03):
-
-| Name | Availability / ownership |
-| --- | --- |
-| `memcache-route-mcp-server` | available (HTTP 404 before publication) |
-| `memcache-route-memcached-protocol` | available |
-| `memcache-route-memcached-core` | available |
-| `memcache-route-diagnostics` | available |
-| `memcache-route-mcrouter` | available |
-| `mcp-server` | **collision**: owned by `dsp-ant` / `baxen` |
-| `diagnostics` | **collision**: owned by `sandeep-datta` |
-
-All internal crates use project-owned `memcache-route-*` names. Local development keeps path
-dependencies and exact `=0.1.0-alpha.10` versions; dependency aliases plus explicit `[lib]` names
-preserve `memcached_protocol`, `memcached_core`, `diagnostics` and `mcrouter` import paths.
-
-Packaging validation:
-
-- `cargo package --list` passed for all five packages and includes `LICENSE`, `README.md` and source
-  files; `tests/**` and `benches/**` are excluded.
-- `cargo package` and `cargo publish --dry-run` passed for
-  `memcache-route-memcached-protocol` (8 files, 56.7 KiB) and
-  `memcache-route-diagnostics` (19 files, 362.1 KiB).
-- Dependent packages cannot be finalized until their internal dependencies exist in the crates.io
-  index; Cargo reports `no matching package named memcache-route-...`.
-- **Publication is blocked:** no crates.io API token is present in `~/.cargo/credentials.toml` or
-  `CARGO_REGISTRY_TOKEN`. No token was printed, copied or committed.
-
-Required publish order once ownership and credentials are approved:
-
-1. `memcache-route-memcached-protocol`
-2. `memcache-route-diagnostics`
-3. `memcache-route-memcached-core`
-4. `memcache-route-mcrouter`
-5. `memcache-route-mcp-server`
-
-The existing GitHub tag/release `v0.1.0-alpha.9` is already published and must not be moved. Publishing
-the `0.1.0-alpha.10` crates does not by itself modify any GitHub tag or release; a new GitHub tag
-would require separate approval.
-
-Then verify with a clean Cargo home:
-
-```bash
-cargo install memcache-route-mcp-server --locked
-# start memcached-mcp over stdio and verify MCP initialize serverInfo.name/version
-```
 
 ## Branding
 
@@ -77,10 +24,9 @@ values schema title, workflow display names, release archive names, the Grafana 
 security/contribution documentation.
 
 The following identifiers were intentionally retained to avoid breaking existing integrations:
-executable `memcached-mcp`, `MEMCACHED_MCP_*` environment
+executable `memcached-mcp`, Rust package names and internal crates, `MEMCACHED_MCP_*` environment
 variables, all MCP tool names, Helm chart name `memcached-mcp`, Helm directory, image repository and
-binary filesystem path. The published GitHub release remains `0.1.0-alpha.9`; the crates.io
-packaging version is `0.1.0-alpha.10` (see below).
+binary filesystem path. Version remains `0.1.0-alpha.9`.
 
 The GitHub repository was renamed to `hakkiburakalks/memcache-route-mcp-server`; the old slug
 redirects, and the local `origin` plus clone/source-label documentation now use the new HTTPS URL.
@@ -107,16 +53,16 @@ The internal compatibility identifiers listed above are unchanged.
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
 | `cargo test --workspace --no-fail-fast` | **287 passed, 0 failed, 0 ignored** |
-| `cargo audit` | PASS — 1403 advisories, 127 dependencies |
+| `cargo audit` | PASS — 1402 advisories, 127 dependencies |
 | `python -I scripts/check-licenses.py` | PASS — 122 dependency licences accepted |
-| `cargo build --release --locked -p memcache-route-mcp-server` | PASS |
+| `cargo build --release --locked -p mcp-server` | PASS |
 | Release binary smoke test | PASS — `smoke ok` with the new MCP identity |
 | Helm `lint --strict` / valid render | PASS |
 | Helm PDB/HPA/NetworkPolicy render | PASS (static) |
 | `docker compose -f tests/compat/docker-compose.yml config --quiet` | PASS |
 | Markdown links/anchors | PASS — all Markdown links and anchors resolve |
-| Version consistency | PASS — `0.1.0-alpha.10` in workspace, `Cargo.lock`, Chart version/appVersion, changelog and README; published GitHub release remains `v0.1.0-alpha.9` |
-| Local history consolidation | PASS — private main contains the five planned commits plus CI follow-ups; GitHub v0.1.0-alpha.9 is published |
+| Version consistency | PASS — `0.1.0-alpha.9` in workspace, `Cargo.lock`, Chart version/appVersion and changelog |
+| Local history consolidation | PASS — private `main` contains the five planned commits plus one CI correction; no tag |
 | `git diff --check` (worktree and `origin/main..HEAD`) | PASS |
 | Current branding image build/runtime | PASS — `memcached-mcp:0.1.0-alpha.9`, read-only rootfs, healthy `/healthz` |
 | Source/dependency SBOM | PASS — 137 SPDX packages / 139 CycloneDX components |
@@ -472,10 +418,10 @@ Local history consolidation completed on `main`; published history was not rewri
 
 - `origin/main` advanced from `ef65d55` through the private fast-forward pushes described below.
 - The tree was clean immediately after consolidation. The alpha.9 feature pass was committed in
-  five planned commits plus CI follow-ups and pushed to the private `main` branch; v0.1.0-alpha.9 is published.
+  five planned commits plus one CI correction and pushed to the private `main` branch; no tag was created.
 - No generated `.pyc`, benchmark output, `.serena` state, SBOM, signing key or temporary evidence is
   present in the commit tree.
-- Tags include `v0.1.0-alpha.9`; its GitHub prerelease and five-platform archives are published. No `v0.1.0-alpha.10` tag exists.
+- Tags remain `v0.1.0-alpha.1`–`v0.1.0-alpha.8`; no alpha.9 tag was created.
 
 ### Tree comparison and recovery
 
@@ -507,8 +453,7 @@ label, remote and documentation references use the new name.
 - Intended tests are present: unit, hostile, e2e, security, metrics, deadlines, memory budget,
   eviction, live, failover and proxy stats views.
 - Intended documentation, Helm hardening, release workflows/scripts, LICENSE and SECURITY are present.
-- Version is consistently `0.1.0-alpha.10` in workspace/crates, chart and packaging docs; the
-  published GitHub release remains `v0.1.0-alpha.9`. No source/test files were removed.
+- Version is consistently `0.1.0-alpha.9`; no source/test files were removed.
 
 ### Chaos Dockerfile HIGH finding
 
@@ -540,9 +485,8 @@ ever promoted beyond disposable local tooling, run it with a dedicated non-root 
   temporary artifact is tracked or untracked in the worktree. Ignored entries are only `target/`,
   `.claude-flow/`, `.claude/` and `.swarm/`.
 - Current tree: **40 Rust source/test files** (32 tracked + 8 new) and **16 Markdown documents**.
-- Version is consistently `0.1.0-alpha.10` in workspace/crates, `Cargo.lock`, chart version/appVersion,
-  changelog and README for the crates packaging pass. The published GitHub release/tag remains
-  `v0.1.0-alpha.9`; no `v0.1.0-alpha.10` tag exists.
+- Version is consistently `0.1.0-alpha.9` in workspace/crates, `Cargo.lock`, chart version/appVersion,
+  changelog and README. The newest tag remains `v0.1.0-alpha.8`; no alpha.9 tag exists.
 - The compatibility matrix was reviewed: the proxy row is now `SUPPORTED (live)`; no `FAIL` status
   remains. Partial/unsupported entries (extstore, exact routing simulation, dynamic proxy/Lua
   behavior and non-live production coverage) still match their evidence and are not claimed complete.
@@ -674,12 +618,11 @@ SDK's `Session termination failed: 202` warning; and proxy counter semantics var
 
 ## Remaining release blockers
 
-1. **GitHub release exists; crates.io publication does not.** `v0.1.0-alpha.9` is tagged and
-   published with five-platform prerelease archives. No `v0.1.0-alpha.10` tag exists, and crates.io
-   publication is blocked on credentials. No post-commit tree/history backup exists yet.
-2. **No published image signature or CI provenance.** The final-tag local image
-   (`memcached-mcp:0.1.0-alpha.9`, revision `d586988`) was built and smoke-tested, but no image is
-   published or signed by CI. Local SBOMs, scans and a Cosign blob signature cover earlier evidence.
+1. **No release tag or GitHub Release.** Private `main` CI passed at `34beb5c`; local tags
+   still end at `v0.1.0-alpha.8`, and no post-commit tree/history backup exists yet.
+2. **No published image signature or CI provenance.** Local SBOMs, vulnerability/secret scans and a
+   local Cosign blob signature exist, but the current local image was built from revision `6441054`,
+   not the final tree, and the image is not published or signed by CI.
 3. **Helm runtime is only locally smoke-tested.** The chart installed and ran on
    kind v1.37.0 with Secret projection, fsGroup, non-root/read-only security and working auth.
    Production ingress, NetworkPolicy CNI enforcement, PDB/HPA behavior, rollout/rollback and token
@@ -722,9 +665,6 @@ SDK's `Session termination failed: 202` warning; and proxy counter semantics var
 14. **Cluster comparison and migration advice are partial.** One live lab comparison and one
     live-router migration review passed, but there is no production or multi-cluster migration
     evidence. No exact key-movement simulation is claimed.
-15. **crates.io publication is blocked.** The five memcache-route-* package names are available and
-    packaging validation passed for the leaf crates, but no crates.io API token exists in the local
-    Cargo credentials or CARGO_REGISTRY_TOKEN. No package was published.
 
 ## Consolidated reports
 

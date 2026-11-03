@@ -1,19 +1,8 @@
 [package]
-name = "memcache-route-memcached-protocol"
+name = "memcached-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-description = "Memcached text and meta protocol codec used by MemCacheRoute MCP Server."
-readme = "../../README.md"
-keywords = ["memcached", "protocol", "codec", "mcp", "cache"]
-categories = ["network-programming", "parser-implementations"]
-exclude = ["tests/**", "benches/**"]
-
-[lib]
-name = "memcached_protocol"
 
 [dependencies]
 thiserror.workspace = true

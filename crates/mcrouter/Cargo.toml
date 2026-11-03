@@ -1,26 +1,15 @@
 [package]
-name = "memcache-route-mcrouter"
+name = "mcrouter"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-description = "Read-only mcrouter config, routing, topology, TKO and migration analysis."
-readme = "../../README.md"
-keywords = ["mcrouter", "memcached", "routing", "diagnostics", "mcp"]
-categories = ["network-programming", "development-tools"]
-exclude = ["tests/**", "benches/**"]
-
-[lib]
-name = "mcrouter"
 
 [dependencies]
-diagnostics = { package = "memcache-route-diagnostics", version = "=0.1.0-alpha.10", path = "../diagnostics" }
+diagnostics = { path = "../diagnostics" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-memcached-core = { package = "memcache-route-memcached-core", version = "=0.1.0-alpha.10", path = "../memcached-core" }
-memcached-protocol = { package = "memcache-route-memcached-protocol", version = "=0.1.0-alpha.10", path = "../memcached-protocol" }
+memcached-core = { path = "../memcached-core" }
+memcached-protocol = { path = "../memcached-protocol" }
 tokio.workspace = true
