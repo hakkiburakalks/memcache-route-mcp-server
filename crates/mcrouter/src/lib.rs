@@ -6,8 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use diagnostics::{Finding, Severity};
 
 pub mod cluster;
+pub mod migration;
 pub mod rca;
+pub mod routing;
 pub mod snapshot;
+pub mod tko;
 use serde::Serialize;
 use serde_json::Value;
 
