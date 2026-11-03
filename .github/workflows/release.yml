@@ -87,6 +87,7 @@ jobs:
       - name: Combined checksum file
         run: cd dist && cat *.sha256 > SHA256SUMS && sha256sum -c SHA256SUMS
       - name: Build provenance for the archives and checksums
+        if: github.event.repository.private == false
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
