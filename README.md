@@ -1,20 +1,56 @@
 # MemCacheRoute MCP Server
 
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-green.svg)](https://modelcontextprotocol.io/)
+
 **Understand your cache. Trace your routes. Diagnose with confidence.**
 
-MemCacheRoute MCP Server is an MCP server for Memcached and mcrouter: AI-powered diagnostics and
-troubleshooting for Memcached and mcrouter. It gives an AI assistant a safe way to inspect cache
-servers and diagnose problems. Read-only by default.
+A community-maintained [Model Context Protocol](https://modelcontextprotocol.io/) server for
+[Memcached](https://memcached.org/) and [mcrouter](https://github.com/facebook/mcrouter). It gives
+Claude and other MCP clients read-only access to cache statistics, RCA, capacity/slab/timeline
+analysis, cluster comparison, mcrouter routing/TKO/migration advice, bounded resources and reusable
+prompts. It is **read-only by default**; writes are opt-in, prefix-limited and audited.
+
+> This is not an official Memcached, Meta or Anthropic product.
 
 > **Name and compatibility.** The project is **MemCacheRoute MCP Server**. The executable
 > (`memcached-mcp`), Rust package names, environment variables (`MEMCACHED_MCP_*`), MCP tool names,
 > Helm chart name (`memcached-mcp`) and image repository keep their original identifiers so existing
-> scripts and deployments continue to work. The MCP `serverInfo.name` is now
+> scripts and deployments continue to work. The MCP `serverInfo.name` is
 > `memcache-route-mcp-server`; tool names, arguments, schemas and transport behavior are unchanged.
 
 Status: early alpha (`0.1.0-alpha.9`). See [COMPATIBILITY.md](COMPATIBILITY.md) for what has actually been tested.
 
-## Safety model
+## ✨ Features
+
+- **Read-only diagnostics by default** for Memcached 1.4/1.5/1.6 and mcrouter 34.x.
+- **Root-cause and incident analysis**: versioned RCA, snapshots, diffs, timelines and cache-efficiency advice.
+- **Capacity and slab evidence**: headroom, eviction pressure, chunk waste, segmented-LRU settings and extstore fields.
+- **Cluster and routing intelligence**: explicit cluster comparison, structural mcrouter impact, failover/TKO evidence and migration advice.
+- **MCP-native**: bounded resources, static investigation prompts and `server_info` structured output.
+- **Safe transport**: stdio or Streamable HTTP, bearer tokens/per-user permissions, allowlists, deadlines, memory budgets and audit redaction.
+- **Cross-platform delivery**: Linux, macOS and Windows binaries; non-root `scratch` container and Helm chart.
+
+## 🚀 Quick Start
+
+Build the server and run it over stdio against an allowlisted Memcached node:
+
+```bash
+cargo build --release --locked -p mcp-server
+MEMCACHED_MCP_ALLOWLIST=127.0.0.1:11211 ./target/release/memcached-mcp
+```
+
+Register it with Claude Code:
+
+```bash
+claude mcp add memcache-route -e MEMCACHED_MCP_ALLOWLIST=127.0.0.1:11211 -- /path/to/memcached-mcp
+```
+
+See [Install](#-installation), [Remote use](#-remote-use-streamable-http) and
+[docs/TOOLS.md](docs/TOOLS.md) for the full catalogue and limits.
+
+## 🔒 Security
 
 - **Read-only by default.** Write tools (`set_key`, `delete_key`, `touch_key`) are not even listed unless `MEMCACHED_MCP_ALLOW_WRITE=1`. There is no flush tool.
 - **Write prefixes.** With `MEMCACHED_MCP_WRITE_PREFIX` (comma-separated, e.g. `tmp:,scratch:`) writes are limited to keys starting with one of the prefixes; others are refused before any connection is made. Without it, any key on an allowlisted server can be written and the server warns at startup.
@@ -26,7 +62,9 @@ Status: early alpha (`0.1.0-alpha.9`). See [COMPATIBILITY.md](COMPATIBILITY.md) 
 - **Bounded replies.** Untrusted server replies have byte budgets as well as line limits: `stats` 8 MiB, non-uniform metadump 16 MiB, uniform scan 64 MiB, values 16 MiB. Each command also has a 60-second total deadline, so a slow-dripping server cannot hold a request open forever. An oversized, malformed or timed-out reply is rejected and its connection retired; partial replies are never returned as complete data. A process-wide reservation budget (`MEMCACHED_MCP_MEMORY_BUDGET_MB`, default 96 MiB) is taken before the large reply buffers and maps; it is a reservation limit, not an absolute RSS cap. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#response-size-limits).
 - **Capability probing.** Features are detected by asking the server (`version`, `mn`), not guessed from the version number.
 
-## Tools
+See [SECURITY.md](SECURITY.md) to report a vulnerability.
+
+## 🛠️ Tools
 
 | Tool | What it does |
 | --- | --- |
@@ -68,7 +106,7 @@ Full schemas, limits and safety properties for the diagnostic tools are in
 
 Diagnostic thresholds are heuristics and have not been tuned on production traffic. Looking up a key's metadata still counts in the server's global `get_hits`/`get_misses` totals, though it leaves the item's LRU position and fetched-before state alone.
 
-## Remote use (Streamable HTTP)
+## 🔧 Remote use (Streamable HTTP)
 
 By default the server speaks MCP over stdio. For shared or remote use, run it as an HTTP service:
 
@@ -132,7 +170,7 @@ scrape_configs:
 
 Scrapes are protected against stampedes and slow upstreams: a process-wide request cap (default 4, `429` above), bounded fan-out (16), an 8 s overall deadline (`503` above), a 5 s successful-body cache with singleflight, a 64 KiB stats / 256 KiB mcrouter-config per-target budget. Concurrent callers share one refresh; a failed refresh never serves an expired body. A target that cannot be read is `memcached_up 0`/`mcrouter_up 0`, never healthy. `memcached_mcp_metrics_cache_age_seconds` and `last_refresh_timestamp_seconds` expose freshness; see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#metrics-resource-and-freshness-semantics) for tuning. The output is expected to pass `promtool check metrics`; this is not run in CI.
 
-## mcrouter destinations
+## 🧭 mcrouter destinations
 
 mcrouter names its destinations as it sees them (often container or service names such as `mc-a:11211`), which this server may not be able to resolve. To inspect the memcached nodes behind an mcrouter, map those names to reachable addresses, and allowlist the addresses too:
 
@@ -143,7 +181,7 @@ MEMCACHED_MCP_ALLOWLIST="10.0.0.9:5000,10.0.1.5:11211,10.0.1.6:11211"
 
 Destinations without a mapping are reported as `unmapped` rather than guessed.
 
-## Install
+## 🚀 Installation
 
 Download a binary for Linux, macOS or Windows from the releases page, or build from source:
 
@@ -151,7 +189,7 @@ Download a binary for Linux, macOS or Windows from the releases page, or build f
 cargo build --release -p mcp-server
 ```
 
-## Docker
+## 🐳 Docker
 
 ```
 docker build -t memcached-mcp .
@@ -178,7 +216,7 @@ verified (transparency-logged, not an image signature), but there is no CI-backe
 signature/provenance or published image yet. See
 [docs/CONTAINER-SECURITY.md](docs/CONTAINER-SECURITY.md).
 
-## Kubernetes (Helm)
+## ☸️ Kubernetes (Helm)
 
 A chart is in `deploy/helm/memcached-mcp`. It runs the HTTP transport as a non-root, read-only-filesystem pod, refuses to render without an allowlist and an existing Secret holding the credentials, and validates critical values with `values.schema.json`:
 
@@ -193,13 +231,13 @@ helm install mcp deploy/helm/memcached-mcp \
 
 The pod speaks plain HTTP, so expose the Service only through a TLS-terminating ingress and add its public name to `allowedHosts` (the Service's own DNS names, such as `mcp-memcached-mcp.<namespace>.svc`, are accepted automatically so in-cluster clients and Prometheus work). The chart sets startup/readiness/liveness probes, a rolling update with `maxUnavailable: 0`, a 30 s termination grace period, and a PDB when more than one replica is used. To limit who can reach the pod, set `networkPolicy.enabled=true` and list the allowed peers in `networkPolicy.allowFrom`; egress isolation is opt-in through `networkPolicy.egress` because the chart does not know your memcached/mcrouter labels. Session affinity is enabled by default because MCP sessions are per-pod; HPA is off by default because scale-down loses sessions. Production install, upgrade, rollback, token-rotation and incident steps are in [docs/OPERATIONS.md](docs/OPERATIONS.md). An earlier revision of the chart was installed on a local kind cluster to check that the pod starts with the read-only filesystem, that the token file mounts, and that clients using the Service DNS name get through the Host check. The current chart was subsequently installed on a local kind v1.37.0 cluster with Secret mode/fsGroup, read-only rootfs, probes, non-root execution and working token authentication; NetworkPolicy/CNI enforcement, PDB/HPA behavior, production ingress and token rotation were not exercised. It has not run on a production cluster. The image is not published, so you have to build and push it yourself.
 
-## Use with Claude Code
+## 💬 Use with Claude Code
 
 ```
 claude mcp add memcache-route -e MEMCACHED_MCP_ALLOWLIST=127.0.0.1:11211 -- /path/to/memcached-mcp
 ```
 
-## Develop
+## 🧪 Development
 
 ```
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
@@ -220,3 +258,25 @@ MCROUTER_PLAIN_ADDR=127.0.0.1:11218 MCROUTER_FAILOVER_ADDR=127.0.0.1:11222 cargo
 ```
 
 Layout: `memcached-protocol` (codec, no I/O), `memcached-core` (client), `diagnostics` and `mcrouter` (pure analysis), `mcp-server` (the binary).
+
+## 🐛 Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| Server not listed in the client | Give the client the absolute path to the `memcached-mcp` binary; GUI clients often do not inherit `PATH` |
+| `ALLOWLIST` / target rejected | Add the exact `host:port` to `MEMCACHED_MCP_ALLOWLIST`; an empty list rejects everything |
+| `401` / `forbidden` over HTTP | Check the bearer token, its permissions and expiry; `read` is required for diagnostic tools |
+| TLS or certificate errors | The server has no in-process TLS. Terminate TLS at a proxy and set `MEMCACHED_MCP_HTTP_ALLOWED_HOSTS` |
+| Timeouts or `exceeded` errors | Check upstream reachability, dead destinations and the tool/connection deadlines |
+| `sample_keys` unavailable | It is opt-in: set `MEMCACHED_MCP_ALLOW_KEY_SAMPLING=1`; key names also need `MEMCACHED_MCP_ALLOW_KEY_NAMES=1` |
+
+## 📝 Notes
+
+- This is an early alpha (`0.1.0-alpha.9`); diagnostic thresholds are heuristics and have not been tuned on production traffic.
+- The server never executes remediation, Lua or proxy configuration. Migration and routing advice are evidence-limited and require human approval.
+- Offline routing simulation is unsupported; use live `mcrouter_trace_key_route` and normal change control.
+- See [COMPATIBILITY.md](COMPATIBILITY.md) and [docs/RELEASE-READINESS.md](docs/RELEASE-READINESS.md) for tested scope and remaining release gates.
+
+## 📄 License
+
+[Apache-2.0](LICENSE): free to use, modify and distribute under the terms of the license.
