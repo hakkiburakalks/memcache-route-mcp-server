@@ -13,6 +13,29 @@ This is the consolidated record of the final QA, P1 live-integration, stabilizat
 work-package reports. The project is safe for local and controlled staging validation; it is not
 claimed to be production-ready.
 
+## Repository publication (2026-11-03)
+
+The GitHub repository is **public**. Pre-publication scanning covered the working tree and the
+73-commit history: no credentials, tokens, private keys, absolute user paths or blobs over 200 KB
+were found, and no `.env`/`.pem`/`.key`/`id_rsa` file was ever tracked. Documentation examples use
+the `192.0.2.0/24` documentation range.
+
+Repository hardening enabled on the same day:
+
+- Secret scanning and push protection: **enabled**; 0 alerts.
+- Dependabot alerts and automated security updates: **enabled**; 0 open alerts.
+- Private vulnerability reporting: **enabled**.
+- Branch protection on `main`: required checks `build (ubuntu-latest)`, `build (macos-latest)`,
+  `audit`, `licenses` and `helm`; force pushes and branch deletion disabled. Administrators may
+  bypass so the solo maintainer can still push; enable `enforce_admins` once review capacity exists.
+- Release build provenance now runs automatically: `release.yml` gates it on
+  `github.event.repository.private == false`, so future tag builds are attested. The existing
+  `v0.1.0-alpha.9` archives predate publication and have no attestation.
+
+Not enabled: CodeQL default setup, and the API silently ignored `secret_scanning_non_provider_patterns`
+and `secret_scanning_validity_checks` (both remained disabled). They can be reviewed from the
+repository security settings if GitHub exposes them for this account.
+
 ## Branding
 
 The project is now **MemCacheRoute MCP Server** — *“Understand your cache. Trace your routes.
@@ -562,8 +585,8 @@ CI evidence:
 
 Completed on 2026-11-03:
 
-- GitHub repository is now **`hakkiburakalks/memcache-route-mcp-server`**, default branch
-  `main`; the old slug redirects.
+- GitHub repository is now **`hakkiburakalks/memcache-route-mcp-server`**, **public**, default
+  branch `main`; the old slug redirects.
 - Local `origin` was updated to
   `https://github.com/hakkiburakalks/memcache-route-mcp-server.git`. SSH is not configured locally
   (`Permission denied (publickey)`), so HTTPS with the existing GitHub credential is retained.
