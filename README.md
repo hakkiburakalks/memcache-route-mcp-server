@@ -280,3 +280,5 @@ Layout: `memcached-protocol` (codec, no I/O), `memcached-core` (client), `diagno
 ## 📄 License
 
 [Apache-2.0](LICENSE): free to use, modify and distribute under the terms of the license.
+
+Copyright © 2026 Hakkı Burak Alkış.

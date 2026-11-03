@@ -3,6 +3,7 @@ name = "mcrouter"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [dependencies]
 diagnostics = { path = "../diagnostics" }
