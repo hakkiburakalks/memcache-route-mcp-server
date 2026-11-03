@@ -7,8 +7,8 @@ the most welcome.
 ## Set up
 
 ```
-git clone https://github.com/hakkiburakalks/memcached-mcp-server
-cd memcached-mcp-server
+git clone https://github.com/hakkiburakalks/memcache-route-mcp-server
+cd memcache-route-mcp-server
 cargo build
 cargo test            # unit tests and tests that need no memcached
 ```

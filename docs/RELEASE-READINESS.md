@@ -28,9 +28,9 @@ executable `memcached-mcp`, Rust package names and internal crates, `MEMCACHED_M
 variables, all MCP tool names, Helm chart name `memcached-mcp`, Helm directory, image repository and
 binary filesystem path. Version remains `0.1.0-alpha.9`.
 
-The actual GitHub repository slug/URL is unchanged (`hakkiburakalks/memcached-mcp-server`) until the
-remote rename to `memcache-route-mcp-server` is explicitly approved and performed; package/clone
-commands in the docs therefore keep the current URL.
+The GitHub repository was renamed to `hakkiburakalks/memcache-route-mcp-server`; the old slug
+redirects, and the local `origin` plus clone/source-label documentation now use the new HTTPS URL.
+The internal compatibility identifiers listed above are unchanged.
 
 ### Branding files changed
 
@@ -437,8 +437,8 @@ Local history consolidation completed on `main`; published history was not rewri
 - Recovery path: clone the verified bundle into a fresh directory or use the live `git reflog` to
   return to the pre-consolidation state. No hard reset or destructive recovery is required.
 
-The actual GitHub repository rename to `memcache-route-mcp-server` and all URL/source-label updates
-remain blocked until the remote rename is approved.
+The GitHub repository rename to `memcache-route-mcp-server` is complete; the clone URL, OCI source
+label, remote and documentation references use the new name.
 
 ### Release content review
 
@@ -532,36 +532,45 @@ Private fast-forward pushes:
 
 - `ef65d55..7d9620e` (`main`)
 - `7d9620e..34beb5c` (`main`), correction only
+- `34beb5c..9a9427b` (`main`), release-readiness evidence
 
-No force push, tag, release, image/Helm publication or repository rename was performed.
+No force push, tag, release or image/Helm publication was performed. The GitHub repository rename
+was completed afterwards; the old URL redirects and local `origin` now uses
+`https://github.com/hakkiburakalks/memcache-route-mcp-server.git` (SSH is not configured locally).
 
 CI evidence:
 
 - Run **41586262241** on `7d9620e`
-  <https://github.com/hakkiburakalks/memcached-mcp-server/actions/runs/41586262241>
+  <https://github.com/hakkiburakalks/memcache-route-mcp-server/actions/runs/41586262241>
   **failed** in `build (ubuntu-latest)` and `build (macos-latest)` at
   `cargo clippy --all-targets -- -D warnings`: `clippy::some_filter` in
   `crates/diagnostics/src/snapshot.rs:962`. All other eight jobs passed.
 - Correction `34beb5c` was pushed normally. Run **41587022980**
-  <https://github.com/hakkiburakalks/memcached-mcp-server/actions/runs/41587022980>
+  <https://github.com/hakkiburakalks/memcache-route-mcp-server/actions/runs/41587022980>
   **passed all 10 jobs**: build (Linux/macOS), mcrouter, Helm, memcached 1.4.39/1.5.22/1.6.45,
   image build/smoke, audit and licences.
-- This release-readiness evidence update is a final docs-only follow-up and is separately validated.
+- Run **41587731807** on the docs-only evidence commit `9a9427b`
+  <https://github.com/hakkiburakalks/memcache-route-mcp-server/actions/runs/41587731807>
+  **passed all 10 jobs** as well.
+- The final rename/documentation update is a docs-only follow-up after `9a9427b` and is validated
+  separately.
 
-### Repository rename checklist
+### Completed repository rename
 
-When the rename to `memcache-route-mcp-server` is approved:
+Completed on 2026-11-03:
 
-- Update `CONTRIBUTING.md` clone URL and `cd` directory, the `Dockerfile`
-  `org.opencontainers.image.source` label, this record, and the Git remote.
-- Keep executable `memcached-mcp`, crate names, `MEMCACHED_MCP_*`, MCP tool names, Helm chart name
-  `memcached-mcp` and image repository unchanged for compatibility.
-- Workflows use `${{ github.repository }}`/`${{ github.ref_name }}` dynamically and the archive
-  prefix is already `memcache-route-mcp-*`; no workflow URL rewrite is required.
-- README and Cargo metadata contain no hardcoded repository clone URL; the only remaining old-slug
-  references are `CONTRIBUTING.md`, `Dockerfile` and this record.
-- Perform the rename before the alpha.9 tag and image publication so attestations, releases and OCI
-  source labels bind the final identity; GitHub redirects are not a substitute for updated labels.
+- GitHub repository is now **`hakkiburakalks/memcache-route-mcp-server`**, private, default branch
+  `main`; the old slug redirects.
+- Local `origin` was updated to
+  `https://github.com/hakkiburakalks/memcache-route-mcp-server.git`. SSH is not configured locally
+  (`Permission denied (publickey)`), so HTTPS with the existing GitHub credential is retained.
+- `CONTRIBUTING.md` clone URL/`cd` path and the `Dockerfile` OCI source label were updated, along
+  with this record. README and Cargo metadata contain no hardcoded clone URL.
+- Workflows use `${{ github.repository }}`/`${{ github.ref_name }}` dynamically; the archive prefix
+  is already `memcache-route-mcp-*`.
+- Internal compatibility identifiers remain unchanged: executable `memcached-mcp`, crate names,
+  `MEMCACHED_MCP_*`, MCP tool names, Helm chart name `memcached-mcp` and image repository.
+- Tag, release, image publication and post-commit backup remain pending.
 
 ### CI and release prerequisites
 
@@ -593,9 +602,8 @@ SDK's `Session termination failed: 202` warning; and proxy counter semantics var
 
 ### Exact release sequence after approval
 
-1. Approve the commit plan and the rename decision.
-2. Commit the five groups, run the full gates on the final commit, and create a fresh tree archive
-   and history bundle.
+1. Approve the tag, release and image-publication plan; the rename and private CI are complete.
+2. Create a fresh post-commit tree archive and history bundle.
 3. Tag and push:
    ```sh
    git tag -a v0.1.0-alpha.9 -m "MemCacheRoute MCP Server 0.1.0-alpha.9"
@@ -635,29 +643,26 @@ SDK's `Session termination failed: 202` warning; and proxy counter semantics var
 8. **No release signing identity.** The Cosign evidence used ephemeral local keys that were deleted
    after verification. Publishing requires an approved CI keyless identity or a managed signing key;
    local test keys must not be reused for release.
-9. **Remote repository rename is pending.** The actual slug/URL and OCI source label stay on
-   `memcached-mcp-server` until the GitHub rename to `memcache-route-mcp-server` is approved and
-   performed.
-10. **Unpublished history consolidation is not executed.** The three local commits still contain the
-    earlier Python cache/benchmark artifacts; history consolidation requires explicit approval.
-    Published history is preserved either way.
-11. **Public Rekor entries require policy review.** Three immutable `hashedrekord` entries exist for
+9. **Unpublished history consolidation is not executed.** The three pre-expansion commits still
+   contain the earlier Python cache/benchmark artifacts; history consolidation requires explicit
+   approval. Published history is preserved either way.
+10. **Public Rekor entries require policy review.** Three immutable `hashedrekord` entries exist for
     local evidence blobs (log indexes 3657074412, 3657085188, 3657100932). They contain no secrets or
     identities, but they were created before publication was approved.
-12. **Expanded alpha analyzers have one synthetic lab pass only.** Capacity, slabs, timeline,
+11. **Expanded alpha analyzers have one synthetic lab pass only.** Capacity, slabs, timeline,
     routing, cluster comparison, migration advice, TKO analysis and the corrected proxy adapter
     were exercised against the isolated lab and real mcrouter/failover/proxy states, but not
     production traffic or multi-cluster infrastructure.
-13. **Routing simulation is unsupported.** The project has no validated offline consistent-hash
+12. **Routing simulation is unsupported.** The project has no validated offline consistent-hash
     simulator and does not claim behavioral equivalence from config parsing; live trace validation is
     the supported path.
-14. **MCP integration remains partial beyond the implemented surface.** Resources, static prompts
+13. **MCP integration remains partial beyond the implemented surface.** Resources, static prompts
     and `server_info` structured output work with the repository harness and an independent Python
     MCP SDK (legacy 2025-11-25 and auto 2026-07-28). Sampling, elicitation, tasks, subscriptions,
     list-changed notifications, pagination, extensions and structured output for other tools are not
     implemented. Only one independent client implementation was tested; the SDK logs
     `Session termination failed: 202` on DELETE although the session ends.
-15. **Cluster comparison and migration advice are partial.** One live lab comparison and one
+14. **Cluster comparison and migration advice are partial.** One live lab comparison and one
     live-router migration review passed, but there is no production or multi-cluster migration
     evidence. No exact key-movement simulation is claimed.
 
@@ -686,5 +691,4 @@ the image is published with CI-backed signature/provenance, the Rekor entries ar
 addressed by policy, and the CI workflow runs on that commit. The proxy blocker is fixed and retested;
 the local kind Helm smoke, reference nginx controls and sampled RSS result remove the "never
 exercised" uncertainty but do not replace production ingress/CNI, cgroup high-water or multi-cluster
-evidence. The remote repository rename remains a release gate unless explicitly accepted as a
-documented risk. Production readiness stays **NOT VERIFIED**.
+evidence. The repository rename is complete. Production readiness stays **NOT VERIFIED**.
