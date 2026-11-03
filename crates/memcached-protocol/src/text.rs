@@ -63,6 +63,19 @@ pub fn encode_version() -> Vec<u8> {
     b"version\r\n".to_vec()
 }
 
+/// Fixed `stats proxy` command for the built-in proxy adapter.
+///
+/// These proxy views are deliberately not added to [`encode_stats`]: callers cannot supply an
+/// arbitrary statistics subcommand. Only the proxy adapter can request these two fixed commands.
+pub fn encode_proxy_stats() -> &'static [u8] {
+    b"stats proxy\r\n"
+}
+
+/// Fixed `stats proxyfuncs` command for the built-in proxy adapter.
+pub fn encode_proxyfuncs() -> &'static [u8] {
+    b"stats proxyfuncs\r\n"
+}
+
 /// Storage commands that carry a data block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreCmd {
@@ -419,6 +432,8 @@ mod tests {
     fn stats_group_cannot_smuggle_a_second_command() {
         assert_eq!(encode_stats(None).unwrap(), b"stats\r\n");
         assert_eq!(encode_stats(Some("items")).unwrap(), b"stats items\r\n");
+        assert_eq!(encode_proxy_stats(), b"stats proxy\r\n");
+        assert_eq!(encode_proxyfuncs(), b"stats proxyfuncs\r\n");
         let too_long = "a".repeat(33);
         for bad in [
             "settings\r\nflush_all",
@@ -430,6 +445,8 @@ mod tests {
             "sizes_enable",
             "detail",
             "ITEMS",
+            "proxy",
+            "proxyfuncs",
             too_long.as_str(),
         ] {
             assert!(

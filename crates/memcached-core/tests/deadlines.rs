@@ -57,6 +57,36 @@ async fn stats_slow_drip_stops_at_the_operation_deadline() {
 }
 
 #[tokio::test]
+async fn proxy_stats_slow_drip_stops_at_the_operation_deadline() {
+    let addr = slow_server(|mut sock| async move {
+        for i in 0..10_000u32 {
+            let line = format!("STAT proxy_{i} {}\r\n", "x".repeat(32));
+            if sock.write_all(line.as_bytes()).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let mut client = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap()
+        .with_operation_deadline(Duration::from_millis(120));
+    let started = Instant::now();
+    let err = client.stats_proxy().await.unwrap_err();
+    assert!(deadline_error(&err), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "proxy stats took {:?}",
+        started.elapsed()
+    );
+    assert!(matches!(
+        client.stats_proxy().await,
+        Err(ClientError::Closed)
+    ));
+}
+
+#[tokio::test]
 async fn metadump_slow_drip_stops_at_the_operation_deadline() {
     let addr = slow_server(|mut sock| async move {
         if sock.write_all(b"OK\r\n").await.is_err() {
@@ -210,5 +240,45 @@ async fn dropping_a_slow_drip_operation_releases_its_reservations() {
         budget.available_bytes(),
         capacity,
         "cancelled slow-drip stats leaked a reservation"
+    );
+}
+
+#[tokio::test]
+async fn dropping_a_slow_drip_proxy_stats_operation_releases_its_reservations() {
+    let addr = slow_server(|mut sock| async move {
+        for i in 0..10_000u32 {
+            let line = format!("STAT proxy_{i} {}\r\n", "x".repeat(32));
+            if sock.write_all(line.as_bytes()).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let budget = Arc::new(MemoryBudget::new(1024 * 1024));
+    let capacity = budget.capacity_bytes();
+    let held = Arc::clone(&budget);
+    let task = tokio::spawn(async move {
+        let mut client = Client::connect(&addr, Duration::from_secs(2))
+            .await
+            .unwrap()
+            .with_operation_deadline(Duration::from_secs(30))
+            .with_memory_budget(held);
+        let _ = client.stats_proxy().await;
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while budget.available_bytes() == capacity {
+        assert!(
+            Instant::now() < deadline,
+            "proxy stats never reserved memory before cancellation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    task.abort();
+    let _ = task.await;
+    assert_eq!(
+        budget.available_bytes(),
+        capacity,
+        "cancelled slow-drip proxy stats leaked a reservation"
     );
 }

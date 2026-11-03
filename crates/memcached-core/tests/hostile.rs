@@ -104,8 +104,71 @@ async fn stats_group_with_a_second_command_never_reaches_the_wire() {
         .await
         .unwrap();
     assert!(c.stats(Some("settings\r\nflush_all")).await.is_err());
+    assert!(c.stats(Some("proxy")).await.is_err());
+    assert!(c.stats(Some("proxyfuncs")).await.is_err());
     drop(c);
     assert!(seen.await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn proxy_stats_commands_are_fixed_and_parsed() {
+    for (expected, call) in [("stats proxy\r\n", 0u8), ("stats proxyfuncs\r\n", 1u8)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let seen = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let n = sock.read(&mut buf).await.unwrap();
+            let got = String::from_utf8_lossy(&buf[..n]).into_owned();
+            sock.write_all(b"STAT proxy_field 7\r\nEND\r\n")
+                .await
+                .unwrap();
+            got
+        });
+        let mut c = Client::connect(&addr, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let stats = if call == 0 {
+            c.stats_proxy().await.unwrap()
+        } else {
+            c.stats_proxyfuncs().await.unwrap()
+        };
+        assert_eq!(stats.get("proxy_field").map(String::as_str), Some("7"));
+        assert_eq!(seen.await.unwrap(), expected);
+    }
+}
+
+#[tokio::test]
+async fn proxy_stats_error_is_not_an_empty_success() {
+    let addr = fake_server(|mut s| async move {
+        let _ = s.write_all(b"ERROR\r\n").await;
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let err = c.stats_proxy().await.unwrap_err().to_string();
+    assert!(err.contains("ERROR"), "{err}");
+}
+
+#[tokio::test]
+async fn proxy_stats_endless_reply_is_cut_off() {
+    let addr = fake_server(|mut s| async move {
+        for i in 0..200_000u32 {
+            if s.write_all(format!("STAT p{i} 1\r\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    let mut c = Client::connect(&addr, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let err = c.stats_proxy().await.unwrap_err().to_string();
+    assert!(err.contains("too many") || err.contains("exceeds"), "{err}");
 }
 
 fn dump_lines(n: usize) -> Vec<u8> {

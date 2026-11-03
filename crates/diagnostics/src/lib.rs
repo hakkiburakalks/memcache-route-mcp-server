@@ -5,12 +5,17 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod advisor;
+pub mod capacity;
+pub mod clusters;
 pub mod history;
 pub mod inventory;
 pub mod prometheus;
+pub mod proxy;
 pub mod rca;
 pub mod remediation;
+pub mod slabs;
 pub mod snapshot;
+pub mod timeline;
 
 pub type Stats = BTreeMap<String, String>;
 

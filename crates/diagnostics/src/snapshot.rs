@@ -55,7 +55,7 @@ const GAUGE_KEYS: &[&str] = &[
 
 const SETTING_KEYS: &[&str] = &["maxconns", "maxbytes", "item_size_max", "chunk_size"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotKind {
     #[default]

@@ -72,6 +72,8 @@ pub struct KeyInfo {
     pub seconds_since_access: Option<u64>,
     /// Whether the item has been fetched since it was stored.
     pub hit_before: bool,
+    /// Whether memcached marked the item stale (meta `X` response flag).
+    pub stale: bool,
     pub cas: Option<u64>,
 }
 
@@ -297,7 +299,34 @@ impl Client {
         arg: Option<&str>,
         max_bytes: u64,
     ) -> Result<BTreeMap<String, String>, ClientError> {
-        self.send(&text::encode_stats(arg)?).await?;
+        let command = text::encode_stats(arg)?;
+        self.stats_command(&command, max_bytes).await
+    }
+
+    /// Read the built-in proxy's documented `stats proxy` view.
+    ///
+    /// The command is a fixed literal, so callers cannot smuggle another statistics subcommand.
+    /// The same reply limits, deadline and memory budget as `stats` apply.
+    pub async fn stats_proxy(&mut self) -> Result<BTreeMap<String, String>, ClientError> {
+        self.stats_command(text::encode_proxy_stats(), MAX_STATS_BYTES)
+            .await
+    }
+
+    /// Read the built-in proxy's documented `stats proxyfuncs` view.
+    ///
+    /// The command is a fixed literal, so callers cannot smuggle another statistics subcommand.
+    /// The same reply limits, deadline and memory budget as `stats` apply.
+    pub async fn stats_proxyfuncs(&mut self) -> Result<BTreeMap<String, String>, ClientError> {
+        self.stats_command(text::encode_proxyfuncs(), MAX_STATS_BYTES)
+            .await
+    }
+
+    async fn stats_command(
+        &mut self,
+        command: &[u8],
+        max_bytes: u64,
+    ) -> Result<BTreeMap<String, String>, ClientError> {
+        self.send(command).await?;
         let started = Instant::now();
         let op_deadline = self.operation_deadline;
         let mut out = BTreeMap::new();
@@ -645,6 +674,7 @@ impl Client {
                         ttl_seconds: ttl.filter(|t| *t >= 0),
                         seconds_since_access: non_negative('l')?,
                         hit_before: find('h') == Some("1"),
+                        stale: find('X').is_some(),
                         cas: non_negative('c')?,
                     })
                 })();
