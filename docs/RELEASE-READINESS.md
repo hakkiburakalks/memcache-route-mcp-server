@@ -52,7 +52,7 @@ commands in the docs therefore keep the current URL.
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| `cargo test --workspace --no-fail-fast` | **244 passed, 0 failed, 0 ignored** |
+| `cargo test --workspace --no-fail-fast` | **287 passed, 0 failed, 0 ignored** |
 | `cargo audit` | PASS — 1402 advisories, 127 dependencies |
 | `python -I scripts/check-licenses.py` | PASS — 122 dependency licences accepted |
 | `cargo build --release --locked -p mcp-server` | PASS |
@@ -60,9 +60,9 @@ commands in the docs therefore keep the current URL.
 | Helm `lint --strict` / valid render | PASS |
 | Helm PDB/HPA/NetworkPolicy render | PASS (static) |
 | `docker compose -f tests/compat/docker-compose.yml config --quiet` | PASS |
-| Markdown links/anchors | PASS — all 56 links resolve |
+| Markdown links/anchors | PASS — all Markdown links and anchors resolve |
 | Version consistency | PASS — `0.1.0-alpha.9` in workspace, `Cargo.lock`, Chart version/appVersion and changelog |
-| Local history consolidation | PASS — 3 commits ahead, 0 behind, clean working tree |
+| Local history consolidation | PASS — 8 commits ahead, 0 behind; the alpha.9 feature pass is committed locally in five commits |
 | `git diff --check` (worktree and `origin/main..HEAD`) | PASS |
 | Current branding image build/runtime | PASS — `memcached-mcp:0.1.0-alpha.9`, read-only rootfs, healthy `/healthz` |
 | Source/dependency SBOM | PASS — 137 SPDX packages / 139 CycloneDX components |
@@ -71,7 +71,7 @@ commands in the docs therefore keep the current URL.
 | Trivy secret scans | PASS — 0 secrets in image/source |
 | Cosign evidence signature | PASS — ephemeral-key blob signature verified; public Rekor entries disclosed below |
 
-The 244-test harness includes 15 live tests that self-skip without lab variables; about **229
+The 287-test harness includes 15 live tests that self-skip without lab variables; about **272
 tests execute assertions locally**. The live matrix was executed separately.
 
 The current branding image was rebuilt from the pinned
@@ -86,12 +86,12 @@ Isolated Docker lab, project-specific network, exact pinned images:
 
 | Area | Evidence | Result |
 |---|---|---|
-| memcached 1.4.39 | core live 3/3; MCP e2e 37/37; `meta: false` | PASS |
-| memcached 1.5.22 | core live 3/3; MCP e2e 37/37; `meta: false` | PASS |
-| memcached 1.6.45 | core live 3/3; MCP e2e 37/37; `meta: true` | PASS |
+| memcached 1.4.39 | core live 3/3; MCP e2e 47/47; `meta: false` | PASS |
+| memcached 1.5.22 | core live 3/3; MCP e2e 47/47; `meta: false` | PASS |
+| memcached 1.6.45 | core live 3/3; MCP e2e 47/47; `meta: true` | PASS |
 | Eviction (4 MB server) | 1/1; critical eviction finding observed | PASS |
 | mcrouter 34.0.0 live | 1/1 | PASS |
-| mcrouter-enabled MCP e2e | 37/37, 0 env-skips | PASS |
+| mcrouter-enabled MCP e2e | 47/47, 0 env-skips | PASS |
 | Failover integration test | **5/5 consecutive runs** with `mc-a` stopped | PASS |
 | Hard failure | plain pool fails loudly; failover stores on `mc-b` | PASS |
 | MCP diagnosis | `down_without_failover` / `failover_active` | PASS |
@@ -101,8 +101,10 @@ connection after a `SERVER_ERROR`; the test now reconnects before follow-up read
 
 ## Live MCP and image evidence
 
-- 14 of 18 read tools were invoked against real services; all returned `isError: false` and the
-  declared `schema_version: "1.0"` where applicable.
+- 14 of the 18 pre-existing read tools were invoked against real services; all returned
+  `isError: false` and the declared `schema_version: "1.0"` where applicable. The expanded alpha
+  tools were exercised in the live campaign below, including real mcrouter/failover/proxy states;
+  the proxy adapter was retested after its blocker fix.
 - New diagnostics were exercised against 1.4.39, 1.5.22 and 1.6.45 with correct meta detection.
 - Auth: missing/wrong token → 401; read-only tokens see no write tools; expiry, per-user limits and
   token reload pass.
@@ -130,6 +132,115 @@ connection after a `SERVER_ERROR`; the test now reconnects before follow-up read
   schema-versioned (`1.0`), bounded and free of automatic remediation.
 - Prometheus remains optional; no external AI service, database, background collector or automatic
   remediation is required.
+
+## Alpha.9 expanded intelligence
+
+Added in this pass, reusing existing collectors and snapshot/RCA engines:
+
+- `plan_cache_capacity` — capacity/workload facts, connection saturation and observed snapshot
+  deltas; no forecast or time-to-exhaustion.
+- `analyze_slab_fragmentation` — per-class chunk/page efficiency, eviction/OOM, segmented-LRU
+  settings and extstore fields with explicit uncertainty.
+- `analyze_incident_timeline` — chronological intervals composed from snapshot diff and history.
+- `analyze_mcrouter_routing` — known route-handle inventory, structural risks, config impact and
+  explicit unsupported/UNKNOWN coverage; no offline routing simulation.
+- `analyze_mcrouter_tko` — soft/hard TKO evidence, destination health, failover/queue counters and
+  missing telemetry.
+- `compare_cache_clusters` — read-only comparison of supplied Memcached/mcrouter cluster snapshots.
+- `advise_cache_migration` — routing/capacity/version/warmup/rollback advice; no data movement or
+  exact key simulation.
+- `analyze_memcached_proxy` — read-only proxy stats adapter for Memcached 1.6.23+; no Lua/config
+  execution.
+- Meta `X` stale flag exposed by `get_key_metadata`.
+
+The maintained coverage matrix is in
+[COMPATIBILITY.md](../COMPATIBILITY.md#feature-and-version-coverage-matrix). The live campaign
+below covers capacity, slabs, timeline, routing, cluster comparison, migration, TKO and the corrected
+proxy adapter; exact routing simulation remains unsupported and is not claimed as complete.
+
+## MCP integration (resources, prompts, structured output)
+
+Added on top of the existing stdio/Streamable HTTP transport and session handling; tool names,
+arguments, authorization, allowlists, deadlines, budgets, audit behavior and existing text results
+are unchanged.
+
+- **Resources:** four bounded, read-only, stable URIs — `memcache-route://capabilities`,
+  `memcache-route://tools`, `memcache-route://operator-guide` and `memcache-route://targets`.
+  URIs over 2048 bytes and content over 64 KiB are rejected. `targets` lists at most 256 allowlisted
+  addresses, requires the `read` permission and audits denials; it never exposes tokens, key values
+  or credentials. No discovery or background collection is added.
+- **Prompts:** six static investigation prompts (`investigate-memory-pressure`,
+  `diagnose-mcrouter-routing`, `investigate-hit-ratio`, `compare-cache-clusters`,
+  `review-cache-migration`, `investigate-failover-tko`). Retrieving one executes no tool and makes
+  no upstream connection. Client-supplied prompt arguments are ignored and never interpolated into
+  the instructions.
+- **Structured output:** `server_info` advertises an `outputSchema` (`version` string,
+  `meta_commands` boolean) and returns matching `structuredContent` while preserving its legacy
+  `version:`/`meta_commands:` text. Other tools keep their existing text/JSON output and advertise
+  no unvalidated output schema. Uncertainty and partial-evidence fields are unchanged.
+- **Protocol:** `initialize` advertises `tools`, `prompts` and `resources`; resources/list,
+  resources/read, prompts/list, prompts/get, tools/list and tools/call are exercised through the
+  real binary over stdio and HTTP. Sessions, bearer authentication, per-user permissions and
+  `/metrics` behavior are unchanged.
+- **Focused tests:** capability negotiation, resources list/read, prompts list/get, structured
+  content versus its advertised schema, unauthorized `targets` access with audit evidence,
+  malformed/wrong-scheme/oversized URIs, ignored injection-like prompt arguments, legacy
+  2024-11-05 initialization and retained text output.
+- **Not implemented/claimed:** sampling, elicitation, tasks, resource subscriptions or
+  `list_changed` notifications, pagination, 2026-07-28 extensions, third-party-client
+  interoperability testing and live external client validation.
+
+## Expanded alpha live campaign (2026-11-03)
+
+Reused the isolated compose lab: memcached 1.4.39 (11214), 1.5.22 (11215), 1.6.45 (11216),
+4 MB 1.6.45 (11217), mcrouter 34.0.0 plain pool (11218) and failover route (11222). The proxy
+phase used a separate official `memcached:1.6.45` container (11223) built with proxy support and
+started with the built-in route library plus a minimal server-owned Lua file; no client-supplied Lua
+was executed. The full MCP e2e suite ran **47/47 on each Memcached version with no skips**.
+
+| Test | Exact result | Status |
+| --- | --- | --- |
+| Capacity healthy / pressure / insufficient / deltas | 1.4.39 `healthy`; 1.6.45 at 82.0% `actionable` (memory, target and low hit ratio); 1.5.22 83 gets `watch`; 3-snapshot history +5.1 pp | **PASS** |
+| Capacity malformed / unavailable | target 2.0 rejected; closed allowlisted 11224 connection error | **PASS** |
+| Slab fragmentation | 1.6.45 class 2 internal waste; 4 MB node class 29 evicted 61 items plus free-chunk opportunities; malformed/unavailable rejected | **PASS** |
+| Incident timeline/history | 2 intervals, 22 events, 4 anomalies (eviction 1.422/s vs 0 baseline); one snapshot `insufficient_evidence`; malformed rejected | **PASS** |
+| Cluster comparison | Two explicit clusters: 5 findings, +37.0 pp memory, +0.442 evictions/s, −1 destination, 4 history anomalies; one/empty cluster rejected | **PASS** |
+| Migration advisor | Live plain router → proposed failover: 6 structural changes, 2 capacity findings, cold-cache expected; malformed/missing/unavailable rejected | **PASS** |
+| Routing analysis | PoolRoute 3 destinations; FailoverRoute depth 2; proposed impact pools +2/−1, destinations −1; malformed/unavailable rejected | **PASS** |
+| TKO healthy/down/recovery | Healthy 0 down/0 suspect; with mc-a stopped: down=1 suspect=1, critical no-failover finding, failover inferred, 35/40 failover probes completed (5 timed out/errored); after restart both routers healthy (3/3 and 2/2 up) | **PASS (state evidence only)** |
+| MCP resources/prompts/structured | 4 resources, 6 prompts, `server_info` structured + legacy text; independent SDK and e2e | **PASS** |
+| Independent MCP client | Python MCP SDK 2.3.0 over Streamable HTTP and stdio: legacy negotiated 2025-11-25, auto negotiated 2026-07-28, 27 tools, unknown tool/resource rejected, bad token 401 | **PASS** |
+| Client session close | DELETE returns 202; SDK logs `Session termination failed: 202` but session ends | **PARTIAL** |
+| Reverse proxy | Reference nginx: MCP works; 4 KiB body 413, 4 KiB header 400, idle close 2.0 s, held connection 503, rapid requests 429 | **PASS (lab)** |
+| Peak memory | Current-tree image, 256 MiB limit, 8 sessions/30 s: 47,388 calls, 0 errors, sampled peak 9.04 MiB, median 8.22 MiB, no OOM, `/healthz` 200 | **PASS (sampled, not cgroup peak)** |
+| Helm runtime | kind v1.37.0, chart installed with in-cluster memcached 1.6.45: Ready, non-root 65532, read-only rootfs, fsGroup 65532, token auth and tools/resources work | **PASS (local kind)** |
+| Proxy-enabled server detection | Official 1.6.45 proxy build: `observed`, `enabled: true`, `statistics_available: true` | **PASS** |
+| Proxy stats parsing | Raw `stats proxy` = 25 `STAT` fields (26 lines including `END`), `stats proxyfuncs` = 4 fields (5 lines); tool returned the same populated 25/4 fields | **PASS** |
+| Proxy-disabled 1.6.45 | `proxy_enabled=no`: `status: disabled`, `enabled: false`, `detected: false`, empty stats | **PASS** |
+| Proxy older versions / safety / deadline | 1.5.22 and 1.4.39 `not_applicable`; extra Lua-like arguments ignored; 500 ms deadline returned in 0.52 s; closed upstream and malformed target rejected | **PASS** |
+
+### Proxy blocker correction (2026-11-03)
+
+- Added fixed `Client::stats_proxy` and `Client::stats_proxyfuncs` commands. `get_stats` and
+  `encode_stats` still reject `proxy`, `proxyfuncs` and every other unlisted group before the wire.
+- `proxy_enabled` now follows documented `yes`/`no` semantics. Missing or malformed values produce
+  `insufficient_evidence`, not inferred enablement.
+- Added explicit `disabled` and `statistics_unavailable` statuses plus `enabled`,
+  `statistics_available` and bounded `statistics_error` fields; command failures are retained.
+- Live retest on the official 1.6.45 proxy build: `observed`, 25 `stats proxy` fields and 4
+  `stats proxyfuncs` fields, matching the raw replies. Disabled 1.6.45: `disabled`. 1.5.22/1.4.39:
+  `not_applicable`. Closed upstream and malformed target: rejected.
+- New coverage: 10 proxy analyzer tests; fixed-command/error/oversize tests; deadline and
+  cancelled-memory-budget tests; enabled/disabled/unavailable/missing/malformed/hostile e2e cases;
+  allowlist and HTTP authorization checks. Full suite: **287 passed, 0 failed, 0 ignored**.
+
+Risks from this campaign: the TKO test observed a down/suspect state and recovery but did not measure
+transition durations; capacity/slab/cluster/migration/timeline results use a synthetic lab workload,
+not production traffic; peak RSS was sampled with `docker stats`, not read from a cgroup high-water
+counter; the nginx result is a reference configuration, not the production ingress; the kind result
+does not cover production ingress, NetworkPolicy enforcement, HA/PDB behavior or token rotation; and
+the proxy correction was verified in the same synthetic lab, while dynamic proxy routing behavior
+remains UNKNOWN and unexecuted.
 
 ## Security and supply-chain evidence
 
@@ -203,7 +314,7 @@ logged before publication, this is an unresolved process deviation that must be 
 
 ### Rekor metadata review (read-only)
 
-Read-only inspection of `https://rekor.sigstore.dev/api/v1/log/entries?logIndex=…` confirmed:
+Read-only inspection of `https://rekor.sigstore.dev/api/v1/log/entries?logIndex=<index>` confirmed:
 
 | Log index | Kind | Artifact hash | Public key SHA-256 | Identity/cert | Inclusion proof |
 |---|---|---|---|---|---|
@@ -269,20 +380,31 @@ cosign verify-blob --key local.pub --bundle evidence.sigstore.json SHA256SUMS
 that time, but it **excludes `.git`, `target`, `.claude-flow` and `.swarm`**. It predates the branding
 and supply-chain changes, so it does **not** cover the current tree or any Git commits/history.
 
-**Verified backups created during this review:**
+**Current consolidated baseline backup (covers `9b05ad0`):**
 
-- Tree: `C:\Users\burak\AppData\Local\Temp\memcache-route-supplychain\tree-20261103-062017.tgz`
-  — 126 entries / 91 files, SHA-256
-  `E87E1D989319E7D2527FECFB2E5C6ADE668A1B6CE169FED63C67D2A6F6A79F47`; key-file hashes matched
-  after extraction. Excludes `.git`, `target`, `node_modules`, `.claude-flow` and `.swarm`.
-- History: `C:\Users\burak\AppData\Local\Temp\memcache-route-supplychain\history-20261103-062017.bundle`
-  — SHA-256 `D989E53CFE8900820E0A136D53FB4B182BD8AAACCD404C393CC6D7A0F8E683FA`;
-  `git bundle verify` reports a complete history. It contains `HEAD`/`main` (`6441054`),
-  `origin/main` (`ef65d55`) and tags `v0.1.0-alpha.1`–`v0.1.0-alpha.8`. Reflogs, hooks and local
-  config are not part of a bundle; the live `.git` directory remains intact.
+- `history-consolidated-20261103-063006.bundle`, SHA-256
+  `CE85A1852E0EEB4B34B570FC217F445C8DE7E7DF4919456F4B08D76487615E12`;
+  `git bundle verify` reports complete history for `9b05ad0` (`main`/`HEAD`), `origin/main`
+  (`ef65d55`) and tags `v0.1.0-alpha.1` through `v0.1.0-alpha.8`.
+- `tree-consolidated-20261103-063006.tgz`, SHA-256
+  `52AB7D8421CA8837C31C6DAF76B1740F24B9155AD78C4A8CECF948FECD869B61`.
+- This baseline does **not** cover the five new local alpha.9 commits.
 
-Together, the tree archive and Git bundle cover all current release files and all local-only
-commits/tags. The previous backup alone is insufficient.
+**Fresh pre-commit backup (2026-11-03 08:39:49, before the local commits):**
+
+- Tree: `C:\Users\burak\AppData\Local\Temp\memcache-route-supplychain\precommit-20261103-083949\tree.tgz`,
+  SHA-256 `5628920C69F06A33D16B4D088C577102D4F136AFCE627D8EEA596DD02C148506`.
+  Verified **98 files**, with every included worktree file byte-identical to disk, including the
+  eight untracked analyzer modules. Excludes `.git` contents, `target`, `.claude-flow`, `.claude`
+  and `.swarm`.
+- History: `C:\Users\burak\AppData\Local\Temp\memcache-route-supplychain\precommit-20261103-083949\history.bundle`,
+  SHA-256 `30813B2C38711F89753F7483BAA94D9A9FEF9B527BABDEF541A67C4B2A2B408A`;
+  `git bundle verify` reports complete history for `9b05ad0` (`main`/`HEAD`), `origin/main` and all
+  tags.
+- The older `tree-20261103-062017.tgz` / `history-20261103-062017.bundle` pair predates `9b05ad0`
+  and is retained only as historical evidence.
+- A fresh tree/history pair must still be created after the five local commits because these backups
+  capture the pre-commit worktree, not the resulting commit IDs.
 
 ### Consolidation result
 
@@ -294,8 +416,9 @@ Local history consolidation completed on `main`; published history was not rewri
 | `2d78eb1` | MemCacheRoute branding and consolidated documentation | README, changelog, security/contribution docs, `docs/` |
 | `HEAD` | Release hygiene, packaging and verification | Dockerfile, Helm, workflows, scripts, fixtures, ignore rules, cleanup record, `.serena` removal |
 
-- `origin/main` remains `ef65d55`; HEAD is exactly **3 commits ahead and 0 behind**.
-- Working tree is clean; no staging/commit/push/tag beyond the approved three local commits.
+- `origin/main` remains `ef65d55`; HEAD is exactly **8 commits ahead and 0 behind**.
+- The tree was clean immediately after consolidation. The later alpha.9 feature pass was committed
+  locally in five commits; it was not pushed or tagged.
 - No generated `.pyc`, benchmark output, `.serena` state, SBOM, signing key or temporary evidence is
   present in the commit tree.
 - Tags remain `v0.1.0-alpha.1`–`v0.1.0-alpha.8`; no alpha.9 tag was created.
@@ -304,10 +427,10 @@ Local history consolidation completed on `main`; published history was not rewri
 
 - Pre-consolidation tree archive: 91 files, 126 entries, SHA-256
   `8D045B81229BA6012A7CE7F86612B038822CEADB51656A097364EB45BC4427F1`.
-- Final tree: 91 files. All source and test files are byte-identical to the archive. The only
-  differences are the final whitespace/metadata updates in `LICENSE`,
-  `REPOSITORY-CLEANUP-REPORT.md` and `docs/RELEASE-READINESS.md`; no source, test, fixture, Helm or
-  workflow file differs or is missing.
+- Final tree after consolidation: 91 files. All source and test files were byte-identical to the
+  archive; only `LICENSE`, `REPOSITORY-CLEANUP-REPORT.md` and this document differed due final
+  whitespace/metadata updates. The subsequent alpha.9 feature pass adds eight pure analyzer modules
+  and documentation updates on top of that consolidated tree.
 - Full pre-consolidation history: `history-final-20261103-062507.bundle`, SHA-256
   `DF4C78CD4D44C2CFDB75F7B16699FC70D57AF1FD3FED918CF84674D46F295082`; `git bundle verify`
   reports a complete history containing `6441054`, `origin/main` (`ef65d55`) and all tags.
@@ -319,15 +442,16 @@ remain blocked until the remote rename is approved.
 
 ### Release content review
 
-- Final tree contains **32 Rust source/test files** (including 10 integration-test files), **16
+- Current tree contains **40 Rust source/test files** (including 10 integration-test files), **16
   Markdown documents**, Helm chart/templates, workflows, scripts and fixtures.
-- Compared with `origin/main`: 63 tracked paths changed plus 24 untracked release files; the only
-  tracked deletions are `.serena/` (agent state); Python cache and benchmark output are removed from
-  the tree.
+- Compared with `origin/main`: 87 tracked paths differ plus 8 untracked analyzer modules (including
+  the 3 local commits); the only tracked deletions are `.serena/` (agent state); Python cache and
+  benchmark output are removed from the tree.
 - Intended source is present: protocol/client/memory, diagnostics/RCA/snapshots/efficiency/
-  remediation/history, mcrouter cluster/failover, MCP auth/audit/HTTP/tools/metrics.
+  remediation/history/capacity/slabs/timeline/cluster comparison, mcrouter cluster/failover/routing/
+  TKO/migration, MCP auth/audit/HTTP/tools/resources/prompts/metrics and the corrected proxy adapter.
 - Intended tests are present: unit, hostile, e2e, security, metrics, deadlines, memory budget,
-  eviction, live and failover.
+  eviction, live, failover and proxy stats views.
 - Intended documentation, Helm hardening, release workflows/scripts, LICENSE and SECURITY are present.
 - Version is consistently `0.1.0-alpha.9`; no source/test files were removed.
 
@@ -345,43 +469,144 @@ does not require a release-image correction. It remains visible and unsuppressed
 ever promoted beyond disposable local tooling, run it with a dedicated non-root capability set
 (`NET_ADMIN` plus file capabilities) and add a process health check.
 
-## Publication commands and approvals
+## Final publication preparation (2026-11-03)
 
-The following are **not executed** and require separate approval:
+### Working-tree audit since `9b05ad0`
 
-1. Approve the GitHub repository rename to `memcache-route-mcp-server`; then update the clone URL
-   in `CONTRIBUTING.md`, the OCI source label and release documentation.
-2. Approve Plan A or Plan B, create the resulting commit set, then tag and push:
+- **Five local commits** contain the 16 previously modified tracked files and 8 new analyzer modules.
+  The working tree is clean. No tracked file is deleted
+  by the expanded-alpha pass; the only historical deletions versus `origin/main` are `.serena/`
+  agent state. `Cargo.toml` and `Cargo.lock` are unchanged since `9b05ad0`, so no new dependency was
+  introduced.
+- Included: capacity, slab, timeline and cluster comparison; mcrouter routing, TKO and migration;
+  MCP resources, prompts and `server_info` structured output; the fixed proxy adapter; and their
+  tests and documentation.
+- No generated logs, benchmark output, SBOM, signing key, token file, `.env`, certificate or
+  temporary artifact is tracked or untracked in the worktree. Ignored entries are only `target/`,
+  `.claude-flow/`, `.claude/` and `.swarm/`.
+- Current tree: **40 Rust source/test files** (32 tracked + 8 new) and **16 Markdown documents**.
+- Version is consistently `0.1.0-alpha.9` in workspace/crates, `Cargo.lock`, chart version/appVersion,
+  changelog and README. The newest tag remains `v0.1.0-alpha.8`; no alpha.9 tag exists.
+- The compatibility matrix was reviewed: the proxy row is now `SUPPORTED (live)`; no `FAIL` status
+  remains. Partial/unsupported entries (extstore, exact routing simulation, dynamic proxy/Lua
+  behavior and non-live production coverage) still match their evidence and are not claimed complete.
+- Full local suite: **287 passed, 0 failed, 0 ignored**; live e2e **47/47** on 1.4.39, 1.5.22 and
+  1.6.45. Proxy live retest: 25 `stats proxy` fields and 4 `stats proxyfuncs` fields, disabled and
+  older-server states correct.
+- The pre-consolidation bundle `history-20261103-062017.bundle` predates `9b05ad0`; it does not cover
+  the three local commits or this worktree. A fresh tree archive and history bundle are required
+  after the final commit.
+
+### Public Rekor metadata confirmation
+
+Read-only `https://rekor.sigstore.dev/api/v1/log/entries?logIndex=<index>` checks of **3657074412**,
+**3657085188** and **3657100932** confirm each body contains only `apiVersion`, `kind`,
+`spec.data.hash`, `spec.signature.content` and `spec.signature.publicKey.content`. No certificate,
+email, OIDC issuer, subject, filename, path or artifact content is present. The three immutable
+`hashedrekord` entries and the documented public transparency-log deviation remain intact. Policy
+acceptance is still required before publication.
+
+### Executed local commit plan
+
+The five local commits are complete and the worktree is clean:
+
+1. `57a860d` `feat(diagnostics): add expanded analyzers and proxy stats support` — capacity, slab,
+   timeline and cluster analyzers, the fixed proxy adapter and client stats views, and regression
+   tests. This combines the planned diagnostics and proxy groups because `diagnostics/src/lib.rs`
+   is shared by both.
+2. `9b815bf` `feat(mcrouter): add routing, TKO and migration intelligence` — routing/config impact,
+   TKO evidence and migration advice.
+3. `9c1cbf1` `feat(mcp): expose expanded diagnostics, resources and prompts` — tool wiring, bounded
+   resources, static prompts, structured output and e2e coverage.
+4. `7133bbc` `docs: update expanded-alpha compatibility and operator guidance` — compatibility,
+   tools, diagnostics, architecture, README and changelog.
+5. This release-readiness commit — audit, backups, Rekor confirmation, rename/CI checklist, staging
+   gates and release sequence.
+
+The proxy correction is in commit 1 rather than a standalone commit so that no partial staging of
+the shared diagnostics module or `main.rs`/`e2e.rs` is required. No push, tag or CI run was made.
+
+### Repository rename checklist
+
+When the rename to `memcache-route-mcp-server` is approved:
+
+- Update `CONTRIBUTING.md` clone URL and `cd` directory, the `Dockerfile`
+  `org.opencontainers.image.source` label, this record, and the Git remote.
+- Keep executable `memcached-mcp`, crate names, `MEMCACHED_MCP_*`, MCP tool names, Helm chart name
+  `memcached-mcp` and image repository unchanged for compatibility.
+- Workflows use `${{ github.repository }}`/`${{ github.ref_name }}` dynamically and the archive
+  prefix is already `memcache-route-mcp-*`; no workflow URL rewrite is required.
+- README and Cargo metadata contain no hardcoded repository clone URL; the only remaining old-slug
+  references are `CONTRIBUTING.md`, `Dockerfile` and this record.
+- Perform the rename before the alpha.9 tag and image publication so attestations, releases and OCI
+  source labels bind the final identity; GitHub redirects are not a substitute for updated labels.
+
+### CI and release prerequisites
+
+- CI currently runs fmt/clippy/tests/build/smoke, the three Memcached versions, mcrouter/failover,
+  image build smoke, Helm render, audit and licence checks. It does **not** start a proxy-enabled
+  Memcached or run the live proxy stats check; add that job before publication if live CI evidence
+  is required by the release policy.
+- Add/confirm a Windows test job; the release workflow builds Windows but CI tests only Ubuntu and
+  macOS.
+- Release workflow prerequisites already present: `v*` tag, `v$chartAppVersion` equality,
+  `contents: write`, `id-token: write` and `attestations: write`. It builds archives and provenance
+  but does **not** publish or sign a container image, SBOM, Helm chart or registry artifact.
+- The current local image was built from revision `6441054`, not the final `9b05ad0` tree; rebuild
+  from the release tag after commit and attach keyless CI provenance/signature.
+- No registry credentials or signing identity are configured. Publication requires an approved
+  registry, keyless CI identity (or managed key), image signing, SBOM attachment and scan evidence.
+
+### Staging gates versus documented alpha limitations
+
+**Must be verified during staging before production:** production ingress/TLS header, body, idle,
+connection and rate controls; NetworkPolicy/CNI enforcement; Secret rotation; PDB/HPA and
+rollout/rollback; cgroup peak RSS/OOM under the production limit; and a live multi-cluster/proxy
+exercise against the intended deployment.
+
+**May remain documented alpha limitations:** no offline routing simulation or exact key-movement
+claim; no Lua execution or dynamic proxy-route analysis; no automatic remediation; no binary
+protocol; no production-traffic evidence for the analyzers; one independent MCP client matrix; the
+SDK's `Session termination failed: 202` warning; and proxy counter semantics varying by build.
+
+### Exact release sequence after approval
+
+1. Approve the commit plan and the rename decision.
+2. Commit the five groups, run the full gates on the final commit, and create a fresh tree archive
+   and history bundle.
+3. Tag and push:
    ```sh
    git tag -a v0.1.0-alpha.9 -m "MemCacheRoute MCP Server 0.1.0-alpha.9"
    git push origin main
    git push origin v0.1.0-alpha.9
    ```
-3. Review and accept the public Rekor entries (or document the policy exception), then approve
-   publishing the image, SBOM/scan results and CI signature/provenance under the approved
-   registry/CI identity. Local build, SBOM, scan and blob-signing evidence is complete; nothing was
-   published.
-4. Approve an isolated staging cluster and reverse-proxy test; validate Secret projection,
-   NetworkPolicy, PDB/HPA, rollout/rollback and token rotation.
-5. Approve the CI run and release publication only after the above gates pass.
+4. Let CI/release build archives and provenance; verify the tag matches chart `appVersion`.
+5. Accept or reject the Rekor deviation, then publish/sign the image, SBOM, scans and Helm artifact
+   under the approved registry/CI identity.
+6. Deploy to the isolated staging cluster, run the staging gates above, and record the result.
+7. Only then approve production readiness; production currently remains **NOT VERIFIED**.
 
 ## Remaining release blockers
 
-1. **No CI/release run and no release tag for this tree.** HEAD is `6441054`, seven commits ahead
-   of `origin/main`; local tags end at `v0.1.0-alpha.8`. The working tree is still uncommitted.
+1. **No CI/release run and no release tag for this tree.** The five alpha.9 commits are local
+   and the worktree is clean; HEAD is eight commits ahead of `origin/main`, local tags end at
+   `v0.1.0-alpha.8`, and no post-commit backup/tag exists yet.
 2. **No published image signature or CI provenance.** Local SBOMs, vulnerability/secret scans and a
-   local Cosign blob signature exist, but the image is not published and has no keyless CI
-   signature, attestation or registry provenance.
-3. **No Helm/Kubernetes runtime evidence.** Lint/render passes, but Secret projection/fsGroup,
-   NetworkPolicy CNI enforcement, PDB/HPA, rollout/rollback, probes and token rotation were not run
-   on a live cluster.
-4. **Reverse-proxy controls are mandatory but unverified.** HTTP header-read, idle and connection
-   limits are delegated to the production ingress; no proxy configuration or runtime test is
-   included.
-5. **No peak-RSS/OOM proof.** The 96 MiB reservation budget is not an RSS cap and the 256 MiB
-   container limit is not measured; Linux/container peak RSS and OOM behavior remain unverified.
-6. **No image/chart publication pipeline and no Windows test-suite CI job.** Release archives are
-   built and smoke-tested by the workflow, but cross-platform live behavior is not exercised in CI.
+   local Cosign blob signature exist, but the current local image was built from revision `6441054`,
+   not the final tree, and the image is not published or signed by CI.
+3. **Helm runtime is only locally smoke-tested.** The chart installed and ran on
+   kind v1.37.0 with Secret projection, fsGroup, non-root/read-only security and working auth.
+   Production ingress, NetworkPolicy CNI enforcement, PDB/HPA behavior, rollout/rollback and token
+   rotation remain unverified.
+4. **Production reverse-proxy controls are unverified.** A reference nginx lab test passed
+   body (413), header (400), idle (2.0 s), connection (503) and rate (429) limits while preserving
+   MCP. The actual production ingress/TLS configuration and limits are still not supplied or tested.
+5. **Peak RSS is sampled, not proven.** The current-tree image completed 47,388 calls in 30 s with
+   a sampled peak of 9.04 MiB under a 256 MiB limit and no OOM, but this is not a cgroup high-water
+   measurement or a production-limit/OOM test. The 96 MiB reservation budget is not an RSS cap.
+6. **No image/chart publication pipeline, no live-proxy CI job and no Windows test-suite job.**
+   Release archives are built and smoke-tested by the workflow, but cross-platform live behavior and
+   real proxy stats are not exercised in CI.
 7. **Residual operational risks:** audit lines can be dropped under queue/disk pressure (counters
    expose it); very large topologies may hit the 65 s/120 s tool deadlines or mcrouter bounds; real
    multi-record DNS resolver behavior and strict-parser compatibility with unusual proxies need a
@@ -392,12 +617,28 @@ The following are **not executed** and require separate approval:
 9. **Remote repository rename is pending.** The actual slug/URL and OCI source label stay on
    `memcached-mcp-server` until the GitHub rename to `memcache-route-mcp-server` is approved and
    performed.
-10. **Unpublished history consolidation is not executed.** The seven local commits still contain the
-    Python cache/benchmark artifacts; Plan A/B above requires explicit approval. Published history is
-    preserved either way.
+10. **Unpublished history consolidation is not executed.** The three local commits still contain the
+    earlier Python cache/benchmark artifacts; history consolidation requires explicit approval.
+    Published history is preserved either way.
 11. **Public Rekor entries require policy review.** Three immutable `hashedrekord` entries exist for
     local evidence blobs (log indexes 3657074412, 3657085188, 3657100932). They contain no secrets or
     identities, but they were created before publication was approved.
+12. **Expanded alpha analyzers have one synthetic lab pass only.** Capacity, slabs, timeline,
+    routing, cluster comparison, migration advice, TKO analysis and the corrected proxy adapter
+    were exercised against the isolated lab and real mcrouter/failover/proxy states, but not
+    production traffic or multi-cluster infrastructure.
+13. **Routing simulation is unsupported.** The project has no validated offline consistent-hash
+    simulator and does not claim behavioral equivalence from config parsing; live trace validation is
+    the supported path.
+14. **MCP integration remains partial beyond the implemented surface.** Resources, static prompts
+    and `server_info` structured output work with the repository harness and an independent Python
+    MCP SDK (legacy 2025-11-25 and auto 2026-07-28). Sampling, elicitation, tasks, subscriptions,
+    list-changed notifications, pagination, extensions and structured output for other tools are not
+    implemented. Only one independent client implementation was tested; the SDK logs
+    `Session termination failed: 202` on DELETE although the session ends.
+15. **Cluster comparison and migration advice are partial.** One live lab comparison and one
+    live-router migration review passed, but there is no production or multi-cluster migration
+    evidence. No exact key-movement simulation is claimed.
 
 ## Consolidated reports
 
@@ -419,8 +660,10 @@ The following development reports were consolidated into this record and the mai
 
 ## Recommendation
 
-**NO-GO for release.** **CONDITIONAL GO for controlled staging** after the consolidation plan is
-approved and executed, the tree is committed/tagged, the image is published with CI-backed
-signature/provenance, the Rekor entries are accepted or addressed by policy, and the CI workflow runs
-on that commit. Helm runtime and the remote repository rename remain release gates unless the project
-explicitly accepts them as documented risks. Production readiness stays **NOT VERIFIED**.
+**NO-GO for release.** **CONDITIONAL GO for controlled staging** after the tree is committed/tagged,
+the image is published with CI-backed signature/provenance, the Rekor entries are accepted or
+addressed by policy, and the CI workflow runs on that commit. The proxy blocker is fixed and retested;
+the local kind Helm smoke, reference nginx controls and sampled RSS result remove the "never
+exercised" uncertainty but do not replace production ingress/CNI, cgroup high-water or multi-cluster
+evidence. The remote repository rename remains a release gate unless explicitly accepted as a
+documented risk. Production readiness stays **NOT VERIFIED**.
